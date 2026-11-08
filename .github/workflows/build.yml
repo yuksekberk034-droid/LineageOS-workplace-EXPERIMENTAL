@@ -31,12 +31,14 @@ jobs:
           chmod a+x ~/bin/repo
 
       - name: Initialize LineageOS Workspace
-        run: |
-          mkdir workspace
-          cd workspace
-          # Replace 'lineage-19.1' with your target version
-          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-19.1 --depth=1
-          
+            run: |
+              mkdir workspace
+              cd workspace
+              ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20 --depth=1
+              
+              mkdir -p .repo/local_manifests
+              cp ../.github/manifests/8492A.xml .repo/local_manifests/
+              
           # Copy the local manifest
           mkdir -p .repo/local_manifests
           cp ../.github/manifests/8492A.xml .repo/local_manifests/

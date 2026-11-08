@@ -40,7 +40,7 @@ jobs:
         run: |
               mkdir workspace
               cd workspace
-              ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20 --depth=1
+              ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1
               
               mkdir -p .repo/local_manifests
               cp ../.github/manifests/8492A.xml .repo/local_manifests/

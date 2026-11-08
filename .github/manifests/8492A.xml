@@ -1,9 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest>
-    <!-- Device Tree -->
-    <project path="device/tcl/8492A" name="YOUR-GITHUB-USERNAME/android_device_tcl_8492A" remote="github" revision="lineage-19.1" />
-    <!-- Vendor Tree -->
-    <project path="vendor/tcl/8492A" name="YOUR-GITHUB-USERNAME/android_vendor_tcl_8492A" remote="github" revision="lineage-19.1" />
-    <!-- Kernel (Remove if using prebuilt in device tree) -->
-    <project path="kernel/tcl/8492A" name="YOUR-GITHUB-USERNAME/android_kernel_tcl_8492A" remote="github" revision="lineage-19.1" />
+    <project path="device/tcl/8492A" name="YOUR-GITHUB-USERNAME/android_device_tcl_8492A" remote="github" revision="lineage-20" />
+    <project path="vendor/tcl/8492A" name="YOUR-GITHUB-USERNAME/android_vendor_tcl_8492A" remote="github" revision="lineage-20" />
+    <project path="kernel/tcl/8492A" name="YOUR-GITHUB-USERNAME/android_kernel_tcl_8492A" remote="github" revision="lineage-20" />
 </manifest>

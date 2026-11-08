@@ -9,7 +9,7 @@ jobs:
     
     steps:
       - name: Checkout Builder Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
@@ -68,8 +68,9 @@ jobs:
           # Build the flashable zip
           mka bacon -j$(nproc --all)
 
+      # Update Upload Artifact to v4
       - name: Upload Flashable ZIP
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: LineageOS-8492A-Build
           path: workspace/out/target/product/8492A/lineage-*.zip

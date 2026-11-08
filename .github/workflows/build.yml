@@ -31,7 +31,7 @@ jobs:
           chmod a+x ~/bin/repo
 
       - name: Initialize LineageOS Workspace
-            run: |
+        run: |
               mkdir workspace
               cd workspace
               ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20 --depth=1
@@ -39,9 +39,9 @@ jobs:
               mkdir -p .repo/local_manifests
               cp ../.github/manifests/8492A.xml .repo/local_manifests/
               
-          # Copy the local manifest
-          mkdir -p .repo/local_manifests
-          cp ../.github/manifests/8492A.xml .repo/local_manifests/
+              # Copy the local manifest
+              mkdir -p .repo/local_manifests
+              cp ../.github/manifests/8492A.xml .repo/local_manifests/
 
       - name: Sync Source Code (Shallow)
         run: |

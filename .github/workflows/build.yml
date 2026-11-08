@@ -38,12 +38,13 @@ jobs:
 
       - name: Initialize LineageOS Workspace
         run: |
-              mkdir workspace
-              cd workspace
-              ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1
-              
-              mkdir -p .repo/local_manifests
-              cp ../.github/manifests/8492A.xml .repo/local_manifests/
+          mkdir workspace
+          cd workspace
+          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1
+          
+          mkdir -p .repo/local_manifests
+          cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
+
               
               # Copy the local manifest
               mkdir -p .repo/local_manifests

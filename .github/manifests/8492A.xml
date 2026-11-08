@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest>
-    <project path="device/tcl/8492A" name="YOUR-GITHUB-USERNAME/android_device_tcl_8492A" remote="github" revision="lineage-20" />
-    <project path="vendor/tcl/8492A" name="YOUR-GITHUB-USERNAME/android_vendor_tcl_8492A" remote="github" revision="lineage-20" />
-    <project path="kernel/tcl/8492A" name="YOUR-GITHUB-USERNAME/android_kernel_tcl_8492A" remote="github" revision="lineage-20" />
+    <!-- Replace 'ACTUAL_GITHUB_USERNAME' with your GitHub handle -->
+    <project path="device/tcl/8492A" name="yuksekberk034-droid/android_device_tcl_8492A" remote="github" revision="lineage-20.0" />
+    <project path="vendor/tcl/8492A" name="yuksekberk034-droid/android_vendor_tcl_8492A" remote="github" revision="lineage-20.0" />
+    <project path="kernel/tcl/8492A" name="yuksekberk034-droid/android_kernel_tcl_8492A" remote="github" revision="lineage-20.0" />
 </manifest>

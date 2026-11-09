@@ -38,3 +38,7 @@ PRODUCT_PACKAGES += \
 
 # Dynamic Partitions
 PRODUCT_USE_DYNAMIC_PARTITIONS := true
+
+# Prebuilt DTB Image Copy Rule
+PRODUCT_COPY_FILES += \
+    device/tcl/8492A/prebuilt/dtb.img:dtb.img

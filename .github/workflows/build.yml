@@ -71,7 +71,7 @@ jobs:
       - name: Sync Source Code
         run: |
           cd workspace
-          ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --depth=1
+          ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
 
           # Reclaim ~20GB of disk space before compilation begins
           rm -rf .repo

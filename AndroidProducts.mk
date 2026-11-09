@@ -1,6 +1,6 @@
 PRODUCT_MAKEFILES := \
-    $(LOCAL_DIR)/line_8492A.mk
+    $(LOCAL_DIR)/lineage_8492A.mk
 
 COMMON_LUNCH_CHOICES := \
-    line_8492A-userdebug \
-    line_8492A-user
+    lineage_8492A-userdebug \
+    lineage_8492A-user

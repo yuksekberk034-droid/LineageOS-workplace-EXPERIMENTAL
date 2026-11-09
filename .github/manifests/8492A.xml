@@ -3,7 +3,5 @@
 
     <!-- Ensure repository names match your actual GitHub URLs -->
     <project path="device/tcl/8492A" name="yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL" remote="github" revision="main" />
-    <project path="vendor/tcl/8492A" name="yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL" remote="github" revision="main" />
-    
     <!-- Remove kernel line if kernel source is prebuilt inside device tree -->
 </manifest>

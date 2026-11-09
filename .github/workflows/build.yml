@@ -71,8 +71,18 @@ jobs:
       - name: Sync Source Code
         run: |
           cd workspace
-          ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+          ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --depth=1
 
+          # Reclaim ~20GB of disk space
+          rm -rf .repo
+
+          # Create a dummy repo script to satisfy LineageOS build-manifest step
+          mkdir -p .repo/repo
+          cat << 'EOF' > .repo/repo/repo
+          #!/usr/bin/env python3
+          print('<?xml version="1.0" encoding="UTF-8"?><manifest></manifest>')
+          EOF
+          chmod a+x .repo/repo/repo
           # Reclaim ~20GB of disk space before compilation begins
           rm -rf .repo
           

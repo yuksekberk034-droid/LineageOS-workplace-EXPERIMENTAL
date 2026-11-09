@@ -31,6 +31,17 @@ jobs:
           sudo apt-get autoremove -y
           sudo apt-get clean
 
+          - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          swap-size-mb: 12288
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
           # Check available space (Target: >45 GB)
           df -h /
 
@@ -73,26 +84,12 @@ jobs:
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
 
-          # Reclaim ~20GB of disk space
-          rm -rf .repo
-
-          # Create a dummy repo script to satisfy LineageOS build-manifest step
-          mkdir -p .repo/repo
-          cat << 'EOF' > .repo/repo/repo
-          #!/usr/bin/env python3
-          print('<?xml version="1.0" encoding="UTF-8"?><manifest></manifest>')
-          EOF
-          chmod a+x .repo/repo/repo
-          # Reclaim ~20GB of disk space before compilation begins
-          rm -rf .repo
-          
       - name: Compile LineageOS
         run: |
           cd workspace
-          mkdir -p tmp
           export TMPDIR="$PWD/tmp"
-          export USE_CCACHE=1
-          export CCACHE_EXEC=$(which ccache)
+          mkdir -p "$TMPDIR"
+          export USE_CCACHE=0
           export _JAVA_OPTIONS="-Xmx4g"
           
           source build/envsetup.sh

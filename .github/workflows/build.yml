@@ -68,8 +68,8 @@ jobs:
           mkdir -p .repo/local_manifests
           cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
 
-          - name: Sync Source Code
-            run: |
+      - name: Sync Source Code
+        run: |
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --depth=1
 

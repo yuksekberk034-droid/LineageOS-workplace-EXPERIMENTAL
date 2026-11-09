@@ -29,7 +29,7 @@ jobs:
           sudo rm -f /swapfile
 
           # Allocate 10GB swap file (with dd fallback)
-          sudo fallocate -l 10G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
+          sudo fallocate -l 5G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=5120
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile

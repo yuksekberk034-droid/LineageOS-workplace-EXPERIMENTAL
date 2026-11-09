@@ -1,68 +1,107 @@
-name: Build LineageOS for TCL 8492A
+name: Build LineageOS for TCL Tab 10L Gen 2
 
 on:
   workflow_dispatch:
+    inputs:
+      lineage_branch:
+        description: LineageOS branch to sync
+        required: true
+        default: lineage-20.0
+        type: string
+      jobs:
+        description: Number of parallel build jobs
+        required: true
+        default: "4"
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: [self-hosted, linux, x64]
+    name: Build LineageOS
+    runs-on: ubuntu-latest
+    timeout-minutes: 420
 
     steps:
-          
-      - name: Checkout Builder Repository
+      - name: Check out device tree
         uses: actions/checkout@v4
+        with:
+          path: device-tree
+          fetch-depth: 1
 
-      - name: Free Disk Space
+      - name: Install build dependencies
         shell: bash
         run: |
-          echo "Disk before cleanup:"
-          df -h
+          set -euxo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 \
+            openjdk-17-jdk
 
-      - name: Install Build Dependencies
+      - name: Install repo tool
+        shell: bash
         run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::Languages=none update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs \
-            gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev \
-            lz4 libncurses5-dev libsdl1.2-dev libssl-dev libxml2-16 libxml2-utils \
-            lzop libxml2-dev libxml2-utils pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
-            python-is-python3
+          set -euxo pipefail
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
 
-          git config --global user.name "GitHub Action Builder"
-          git config --global user.email "actions@github.com"
-
-          mkdir -p ~/bin
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-
-      - name: Initialize LineageOS Workspace
+      - name: Initialize LineageOS source tree
+        shell: bash
         run: |
-          mkdir workspace
-          cd workspace
-          echo "Workspace: $GITHUB_WORKSPACE"
-          ls -la "$GITHUB_WORKSPACE/.github/manifests"
-          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1
-          mkdir -p .repo/local_manifests
-          cp "$GITHUB_WORKSPACE/.github/manifests/8492A.xml" .repo/local_manifests/
-      - name: Sync Source Code
-        run: |
-          cd workspace
-          ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/android"
+          cd "$GITHUB_WORKSPACE/android"
+          repo init -u https://github.com/LineageOS/android.git -b "${{ inputs.lineage_branch }}" --git-lfs
 
-      - name: Compile LineageOS
+      - name: Sync LineageOS source
+        shell: bash
         run: |
-          cd workspace
-          export TMPDIR="$PWD/tmp"
-          mkdir -p "$TMPDIR"
-          export USE_CCACHE=0
-          export _JAVA_OPTIONS="-Xmx4g"
+          set -euxo pipefail
+          cd "$GITHUB_WORKSPACE/android"
+          repo sync -c --force-sync --no-clone-bundle -j"${{ inputs.jobs }}"
 
+      - name: Copy device tree into source tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/android/device/tcl/8492A"
+          rsync -a --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            "$GITHUB_WORKSPACE/device-tree/" \
+            "$GITHUB_WORKSPACE/android/device/tcl/8492A/"
+
+      - name: Prepare environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$GITHUB_WORKSPACE/android"
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
-          mka bacon -j2
 
-      - name: Upload Flashable ZIP
+      - name: Build LineageOS
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$GITHUB_WORKSPACE/android"
+          source build/envsetup.sh
+          lunch lineage_8492A-userdebug
+          mka bacon -j"${{ inputs.jobs }}"
+
+      - name: Upload build artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: LineageOS-8492A-Build
-          path: workspace/out/target/product/8492A/lineage-*.zip
+          name: lineage-8492A-${{ inputs.lineage_branch }}
+          path: |
+            ${{ github.workspace }}/android/out/target/product/8492A/*.zip
+            ${{ github.workspace }}/android/out/target/product/8492A/*.img
+          if-no-files-found: error
+          retention-days: 7

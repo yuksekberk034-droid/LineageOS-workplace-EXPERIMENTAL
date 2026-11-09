@@ -8,7 +8,7 @@ $(call inherit-product, device/tcl/8492A/device.mk)
 $(call inherit-product-if-exists, vendor/tcl/8492A/8492A-vendor.mk)
 
 # Product Information
-PRODUCT_NAME := line_8492A
+PRODUCT_NAME := lineage_8492A
 PRODUCT_DEVICE := 8492A
 PRODUCT_BRAND := TCL
 PRODUCT_MODEL := TCL Tab 10L Gen 2

@@ -34,6 +34,11 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
+      - name: Diagnose root disk usage
+        run: |
+          df -h /
+          sudo du -xhd1 / 2>/dev/null | sort -h
+
       - name: Install Build Dependencies
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::Languages=none update

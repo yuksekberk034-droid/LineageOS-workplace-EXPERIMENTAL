@@ -22,7 +22,7 @@ PRODUCT_PACKAGES += \
     android.hardware.boot@1.0-service \
     bootctrl.mt6761
 
-#PRODUCT_STATIC_BOOT_CONTROL_HAL := \
+# PRODUCT_STATIC_BOOT_CONTROL_HAL := \
     #bootctrl.mt6761 \
     #libgptutils \
     #libz \

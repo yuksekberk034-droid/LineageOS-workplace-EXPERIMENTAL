@@ -17,17 +17,6 @@ jobs:
         run: |
           echo "Disk before cleanup:"
           df -h
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
-          sudo docker system prune -af || true
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          echo "Disk after cleanup:"
-          df -h
-
-      - name: Diagnose root disk usage
-        run: |
-          df -h /
-          sudo du -xhd1 / 2>/dev/null | sort -h
 
       - name: Install Build Dependencies
         run: |
@@ -52,11 +41,9 @@ jobs:
           cd workspace
           echo "Workspace: $GITHUB_WORKSPACE"
           ls -la "$GITHUB_WORKSPACE/.github/manifests"
-          cp "$GITHUB_WORKSPACE/.github/manifests/8492A.xml" .repo/local_manifests/
           ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1
           mkdir -p .repo/local_manifests
-          cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
-
+          cp "$GITHUB_WORKSPACE/.github/manifests/8492A.xml" .repo/local_manifests/
       - name: Sync Source Code
         run: |
           cd workspace

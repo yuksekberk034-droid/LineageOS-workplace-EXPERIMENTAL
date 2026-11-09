@@ -8,7 +8,7 @@
 
 set -e
 
-DEVICE=Freyr_10_1_WiFi
+DEVICE=8492A
 VENDOR=tcl
 
 # Load extract_utils and do some sanity checks

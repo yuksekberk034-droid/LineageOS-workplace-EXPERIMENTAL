@@ -22,6 +22,14 @@ jobs:
           sudo apt-get clean
           df -h
 
+      - name: Allocate Swap Space
+        run: |
+          sudo fallocate -l 10G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          
       - name: Install Build Dependencies
         run: |
           sudo apt-get update

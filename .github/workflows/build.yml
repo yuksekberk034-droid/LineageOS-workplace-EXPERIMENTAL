@@ -8,6 +8,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          
       - name: Checkout Builder Repository
         uses: actions/checkout@v4
 
@@ -22,17 +34,6 @@ jobs:
           sudo rm -rf /var/lib/apt/lists/*
           echo "Disk after cleanup:"
           df -h
-
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 2048
-          swap-size-mb: 4096
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
 
       - name: Diagnose root disk usage
         run: |
@@ -60,6 +61,9 @@ jobs:
         run: |
           mkdir workspace
           cd workspace
+          echo "Workspace: $GITHUB_WORKSPACE"
+          ls -la "$GITHUB_WORKSPACE/.github/manifests"
+          cp "$GITHUB_WORKSPACE/.github/manifests/8492A.xml" .repo/local_manifests/
           ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1
           mkdir -p .repo/local_manifests
           cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/

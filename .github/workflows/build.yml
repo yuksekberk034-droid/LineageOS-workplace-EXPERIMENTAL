@@ -42,14 +42,12 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
-          # Check available space (Target: >45 GB)
-          df -h /
-
       - name: Allocate Swap Space
         run: |
           # Turn off existing swap to unlock /swapfile
           sudo swapoff -a || true
           sudo rm -f /swapfile
+          df -h /
 
           # Allocate 10GB swap file (with dd fallback)
           sudo fallocate -l 10G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240

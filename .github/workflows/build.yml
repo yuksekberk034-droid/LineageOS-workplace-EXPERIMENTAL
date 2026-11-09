@@ -11,16 +11,28 @@ jobs:
       - name: Checkout Builder Repository
         uses: actions/checkout@v4
 
-      - name: Free Disk Space
+      - name: Maximize Runner Disk Space
         run: |
+          # Turn off system swap
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+
+          # Remove heavy toolchains, SDKs, and Docker images
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /opt/hostedtoolcache
           sudo rm -rf /usr/local/share/boost
-          sudo docker image prune --all --force
+          sudo rm -rf /var/lib/docker
+          sudo rm -rf /usr/share/swift
+
+          # Purge unused system packages
+          sudo apt-get remove -y '^ghc-.*' '^dotnet-.*' '^llvm-.*' 'php.*' 'google-chrome-stable' 'firefox' 'powershell' 'azure-cli' --fix-missing || true
+          sudo apt-get autoremove -y
           sudo apt-get clean
-          df -h
+
+          # Check available space (Target: >45 GB)
+          df -h /
 
       - name: Allocate Swap Space
         run: |
@@ -29,7 +41,7 @@ jobs:
           sudo rm -f /swapfile
 
           # Allocate 10GB swap file (with dd fallback)
-          sudo fallocate -l 5G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=5120
+          sudo fallocate -l 10G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile

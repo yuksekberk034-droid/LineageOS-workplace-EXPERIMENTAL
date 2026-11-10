@@ -30,6 +30,32 @@ jobs:
           path: device-tree
           fetch-depth: 1
 
+      - name: Reclaim unused runner space
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # Remove unrelated preinstalled toolchains; keep Android and Java tools.
+          for path in \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/share/powershell \
+            /usr/local/.ghcup \
+            /usr/share/swift
+          do
+            if [ -e "$path" ]; then
+              sudo rm -rf "$path"
+            fi
+          done
+
+          # Clear package download/cache data, not installed packages.
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+          echo "Available workspace storage:"
+          df -h "$GITHUB_WORKSPACE"
+          df -i "$GITHUB_WORKSPACE"
+
       - name: Install build dependencies
         shell: bash
         run: |

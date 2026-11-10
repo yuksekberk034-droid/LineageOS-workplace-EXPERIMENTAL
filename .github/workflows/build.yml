@@ -1,72 +1,88 @@
-name: Build LineageOS for TCL 8492A
+name: Build LineageOS 20.0 for TCL 8492A
 
 on:
   workflow_dispatch:
+    inputs:
+      BUILD_TYPE:
+        description: 'Build Type (user, userdebug, eng)'
+        required: true
+        default: 'userdebug'
+      CLEAN_BUILD:
+        description: 'Clean out dir before build'
+        type: boolean
+        default: false
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    
+    name: Build LineageOS 20.0
+    # Use 'self-hosted' for a dedicated build machine, or a large runner
+    runs-on: self-hosted
+
     steps:
-      - name: Checkout Builder Repository
-        uses: actions/checkout@v4
-
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          swap-size-mb: 8192
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-
-      - name: Install Build Dependencies
+      - name: Free Disk Space & Clean Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3
-          df -h /
-          
-          git config --global user.name "GitHub Action Builder"
-          git config --global user.email "actions@github.com"
-          
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf lib32ncurses5-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc zip zlib1g-dev openjdk-11-jdk python3 rsync
+          sudo mkdir -p /mnt/build
+          sudo chown -R $USER:$USER /mnt/build
+
+      - name: Install Repo Tool
+        run: |
           mkdir -p ~/bin
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Initialize LineageOS Workspace
+      - name: Configure Git
         run: |
-          mkdir workspace
-          cd workspace
-          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1
-          
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Initialize LineageOS 20.0 Source
+        run: |
+          cd /mnt/build
+          repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --git-lfs --depth=1
+
+      - name: Add Local Manifests
+        run: |
+          cd /mnt/build
           mkdir -p .repo/local_manifests
-          cp ../.github/manifests/8492A.xml .repo/local_manifests/
+          cat << 'EOF' > .repo/local_manifests/tcl_8492A.xml
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <project path="device/tcl/8492A" name="${{ github.repository_owner }}/android_device_tcl_8492A" remote="github" revision="lineage-20.0" />
+            <project path="vendor/tcl/8492A" name="${{ github.repository_owner }}/android_vendor_tcl_8492A" remote="github" revision="lineage-20.0" />
+            <project path="kernel/tcl/8492A" name="${{ github.repository_owner }}/android_kernel_tcl_8492A" remote="github" revision="lineage-20.0" />
+          </manifest>
+          EOF
 
-      - name: Sync Source Code (Shallow)
+      - name: Sync Repositories
         run: |
-          cd workspace
-          ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
-          df -h /
+          cd /mnt/build
+          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
 
-      - name: Set Up ccache
-        uses: hendrikmuhs/ccache-action@v1.2.14
-        with:
-          max-size: "10G"
-
-      - name: Compile LineageOS
+      - name: Set Up CCache
         run: |
-          cd workspace
-          export USE_CCACHE=1
-          export CCACHE_EXEC=$(which ccache)
-          
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "CCACHE_EXEC=/usr/bin/ccache" >> $GITHUB_ENV
+          ccache -M 50G
+
+      - name: Build LineageOS
+        run: |
+          cd /mnt/build
+          if [ "${{ inputs.CLEAN_BUILD }}" = "true" ]; then
+            make clean
+          fi
           source build/envsetup.sh
-          lunch lineage_8492A-userdebug
+          lunch lineage_8492A-${{ inputs.BUILD_TYPE }}
           mka bacon -j$(nproc --all)
 
-      - name: Upload Flashable ZIP
+      - name: Upload Output Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: LineageOS-8492A-Build
-          path: workspace/out/target/product/8492A/lineage-*.zip
+          name: LineageOS-20.0-TCL-8492A
+          path: |
+            /mnt/build/out/target/product/8492A/lineage-*.zip
+            /mnt/build/out/target/product/8492A/recovery.img
+            /mnt/build/out/target/product/8492A/boot.img
+          if-no-files-found: error

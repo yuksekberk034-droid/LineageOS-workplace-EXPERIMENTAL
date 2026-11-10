@@ -68,18 +68,12 @@ jobs:
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
 
-      - name: Set Up ccache
-        uses: hendrikmuhs/ccache-action@v1.2.14
-        with:
-          max-size: "10G"
-
       - name: Compile LineageOS
         run: |
           cd workspace
           mkdir -p tmp
           export TMPDIR="$PWD/tmp"
-          export USE_CCACHE=1
-          export CCACHE_EXEC=$(which ccache)
+          export USE_CCACHE=0
           export _JAVA_OPTIONS="-Xmx4g"
           df -h /
           

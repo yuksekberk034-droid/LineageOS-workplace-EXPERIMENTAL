@@ -11,27 +11,10 @@ jobs:
       - name: Checkout Builder Repository
         uses: actions/checkout@v4
 
-      - name: Free Runner Disk Space
+      - name: Direct System Space Cleanup
         run: |
           sudo swapoff -a || true
           sudo rm -f /swapfile
-          df -h /
-          
-      - name: Free Disk Space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /var/lib/docker
-          sudo rm -rf /usr/share/swift
-          sudo docker image prune --all --force
-          sudo apt-get clean
-          df -h /
-          
-      - name: Purge System Bloat
-        run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
@@ -40,27 +23,19 @@ jobs:
           sudo rm -rf /var/lib/docker
           sudo rm -rf /usr/share/swift
           sudo apt-get clean
-          df -h /
-
-      - name: Allocate Swap Space
-        run: |
-          # Turn off existing swap to unlock /swapfile
-          sudo swapoff -a || true
-          sudo rm -f /swapfile
-
-          # Allocate 10GB swap file (with dd fallback)
+          
+          # Re-allocate a lean 8GB swap file for memory spikes
           sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          free -h
+          
           df -h /
 
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3
-          df -h /
           
           git config --global user.name "GitHub Action Builder"
           git config --global user.email "actions@github.com"
@@ -73,30 +48,28 @@ jobs:
         run: |
           mkdir workspace
           cd workspace
-          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1
+          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1 --no-clone-bundle
           
           mkdir -p .repo/local_manifests
           cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
-          df -h /
 
-      - name: Sync Source Code (Shallow)
+      - name: Sync Source Code
         run: |
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
           
-          # Safely delete git objects inside project trees while in workspace directory
-          find .repo/projects -name "*.git" -type d -exec rm -rf {} + 2>/dev/null || true
+          # Delete legacy untracked host clang compiler (saves ~2GB without breaking manifest)
+          rm -rf prebuilts/clang/host/linux-x86/clang-3289846 || true
           
           df -h /
 
       - name: Compile LineageOS
         run: |
           cd workspace
-          mkdir -p tmp
           export TMPDIR="$PWD/tmp"
+          mkdir -p "$TMPDIR"
           export USE_CCACHE=0
           export _JAVA_OPTIONS="-Xmx4g"
-          df -h /
           
           source build/envsetup.sh
           lunch lineage_8492A-userdebug

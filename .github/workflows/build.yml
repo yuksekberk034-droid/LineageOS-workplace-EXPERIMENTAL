@@ -85,6 +85,7 @@ jobs:
           export USE_CCACHE=1
           export CCACHE_EXEC=$(which ccache)
           export _JAVA_OPTIONS="-Xmx4g"
+          df -h /
           
           source build/envsetup.sh
           lunch lineage_8492A-userdebug

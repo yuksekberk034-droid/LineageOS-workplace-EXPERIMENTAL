@@ -22,8 +22,10 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /opt/hostedtoolcache
           sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /var/lib/docker
+          sudo rm -rf /usr/share/swift
           sudo docker image prune --all --force
           sudo apt-get clean
           df -h
@@ -46,6 +48,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3
+          df -h/
           
           git config --global user.name "GitHub Action Builder"
           git config --global user.email "actions@github.com"
@@ -62,11 +65,13 @@ jobs:
           
           mkdir -p .repo/local_manifests
           cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
+          df -h /
 
       - name: Sync Source Code (Shallow)
         run: |
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+          df -h /
 
       - name: Compile LineageOS
         run: |

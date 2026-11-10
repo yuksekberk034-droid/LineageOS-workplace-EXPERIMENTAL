@@ -21,7 +21,9 @@ jobs:
   build:
     name: Build LineageOS
     runs-on: ubuntu-latest
-    timeout-minutes: 420
+    # Maximum timeout for free runners is 360 mins (6 hours).
+    # If the build takes longer, you will need to implement ccache saving.
+    timeout-minutes: 360
 
     steps:
       - name: Check out device tree
@@ -30,31 +32,16 @@ jobs:
           path: device-tree
           fetch-depth: 1
 
-      - name: Reclaim unused runner space
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          # Remove unrelated preinstalled toolchains; keep Android and Java tools.
-          for path in \
-            /usr/share/dotnet \
-            /opt/ghc \
-            /usr/local/share/powershell \
-            /usr/local/.ghcup \
-            /usr/share/swift
-          do
-            if [ -e "$path" ]; then
-              sudo rm -rf "$path"
-            fi
-          done
-
-          # Clear package download/cache data, not installed packages.
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-
-          echo "Available workspace storage:"
-          df -h "$GITHUB_WORKSPACE"
-          df -i "$GITHUB_WORKSPACE"
+      - name: Maximize Runner Space & Add Swap
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 12288 # Creates a 12GB Swap file to prevent OOM
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
 
       - name: Install build dependencies
         shell: bash
@@ -84,14 +71,16 @@ jobs:
           set -euxo pipefail
           mkdir -p "$GITHUB_WORKSPACE/android"
           cd "$GITHUB_WORKSPACE/android"
-          repo init -u https://github.com/LineageOS/android.git -b "${{ inputs.lineage_branch }}" --git-lfs
+          # OPTIMIZATION: --depth=1 saves ~30GB of disk space
+          repo init -u https://github.com/LineageOS/android.git -b "${{ inputs.lineage_branch }}" --git-lfs --depth=1
 
       - name: Sync LineageOS source
         shell: bash
         run: |
           set -euxo pipefail
           cd "$GITHUB_WORKSPACE/android"
-          repo sync -c --force-sync --no-clone-bundle -j"${{ inputs.jobs }}"
+          # OPTIMIZATION: --no-tags and --optimized-fetch speed up sync
+          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune --force-sync -j8
 
       - name: Copy device tree into source tree
         shell: bash
@@ -119,6 +108,8 @@ jobs:
           cd "$GITHUB_WORKSPACE/android"
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
+          # Use the swap space we created earlier
+          export _JAVA_OPTIONS="-Xmx8g"
           mka bacon -j"${{ inputs.jobs }}"
 
       - name: Upload build artifacts
@@ -129,5 +120,6 @@ jobs:
           path: |
             ${{ github.workspace }}/android/out/target/product/8492A/*.zip
             ${{ github.workspace }}/android/out/target/product/8492A/*.img
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
+          

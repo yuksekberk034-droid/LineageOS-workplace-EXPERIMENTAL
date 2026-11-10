@@ -74,7 +74,6 @@ jobs:
           
           # Safe host toolchain and dump deletions (leaves prebuilts/sdk/tools intact for jetifier)
           rm -rf prebuilts/gcc/linux-x86/host
-          rm -rf prebuilts/abi-dumps
           rm -rf prebuilts/clang/host/linux-x86/clang-3289846
           
           # Safely delete git objects inside project trees while in workspace directory

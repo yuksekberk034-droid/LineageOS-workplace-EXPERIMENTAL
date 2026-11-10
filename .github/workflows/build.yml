@@ -28,7 +28,7 @@ jobs:
           sudo rm -rf /usr/share/swift
           sudo docker image prune --all --force
           sudo apt-get clean
-          1.Purge Runner Bloat Before Disk Expansion:System-level cleanup.In .github/workflows/build.yml, add a system purge step right before Maximize Build Space. This frees system bloat so easimon/maximize-build-space can assign it to your build volume:YAML      - name: Purge System Bloat
+      - name: Purge System Bloat
         run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
@@ -52,7 +52,6 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
           build-mount-path: '/home/runner/work'
-          df -h
 
       - name: Allocate Swap Space
         run: |

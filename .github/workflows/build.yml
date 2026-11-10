@@ -28,6 +28,30 @@ jobs:
           sudo rm -rf /usr/share/swift
           sudo docker image prune --all --force
           sudo apt-get clean
+          1.Purge Runner Bloat Before Disk Expansion:System-level cleanup.In .github/workflows/build.yml, add a system purge step right before Maximize Build Space. This frees system bloat so easimon/maximize-build-space can assign it to your build volume:YAML      - name: Purge System Bloat
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /var/lib/docker
+          sudo rm -rf /usr/share/swift
+          sudo apt-get clean
+          df -h /
+
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 512
+          temp-reserve-mb: 100
+          swap-size-mb: 12288
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          build-mount-path: '/home/runner/work'
           df -h
 
       - name: Allocate Swap Space
@@ -71,10 +95,6 @@ jobs:
         run: |
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
-          
-          # Safe host toolchain and dump deletions (leaves prebuilts/sdk/tools intact for jetifier)
-          rm -rf prebuilts/gcc/linux-x86/host
-          rm -rf prebuilts/clang/host/linux-x86/clang-3289846
           
           # Safely delete git objects inside project trees while in workspace directory
           find .repo/projects -name "*.git" -type d -exec rm -rf {} + 2>/dev/null || true

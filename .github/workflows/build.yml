@@ -16,16 +16,28 @@ jobs:
   build:
     name: Build LineageOS 20.0
     # Use 'self-hosted' for a dedicated build machine, or a large runner
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
       - name: Free Disk Space & Clean Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf lib32ncurses5-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc zip zlib1g-dev openjdk-11-jdk python3 rsync
+          # 1. Kill any existing apt locks or background update services
+          sudo killall apt apt-get unattended-upgrade 2>/dev/null || true
+          sudo rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock
+
+          # 2. Update and install packages completely non-interactively
+          sudo -E apt-get update -qq
+          sudo -E apt-get install -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib git git-lfs \
+            gnupg gperf lib32ncurses5-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc \
+            zip zlib1g-dev openjdk-11-jdk python3 rsync
+
+          # 3. Setup target directory
           sudo mkdir -p /mnt/build
           sudo chown -R $USER:$USER /mnt/build
-
+          
       - name: Install Repo Tool
         run: |
           mkdir -p ~/bin

@@ -9,6 +9,10 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: Check the Storage
+        run: |
+          df -h /
+        
       - name: Checkout Builder Repository
         uses: actions/checkout@v4
 
@@ -28,12 +32,14 @@ jobs:
           # Remove default swap from /mnt to free up the full 14GB secondary drive
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile || true
+          df -h /
           
           # Create an 8GB swap on the main root drive
           sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          df -h /
 
       - name: Install Build Dependencies
         run: |
@@ -46,6 +52,7 @@ jobs:
           mkdir -p ~/bin
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
           chmod a+x ~/bin/repo
+           df -h /
 
       - name: Split Storage & Initialize Workspace
         run: |
@@ -61,6 +68,7 @@ jobs:
           
           mkdir -p .repo/local_manifests
           cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
+          df -h /
 
       - name: Sync Source Code
         run: |
@@ -80,10 +88,12 @@ jobs:
           mkdir -p "$TMPDIR"
           export USE_CCACHE=0
           export _JAVA_OPTIONS="-Xmx4g"
+          df -h /
           
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
           mka bacon -j2
+          df -h /
 
       - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4

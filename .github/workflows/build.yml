@@ -11,22 +11,6 @@ jobs:
       - name: Checkout Builder Repository
         uses: actions/checkout@v4
 
-      - name: Maximize Runner Disk Space
-        run: |
-          sudo swapoff -a || true
-          sudo rm -f /swapfile
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /var/lib/docker
-          sudo rm -rf /usr/share/swift
-          sudo apt-get remove -y '^ghc-.*' '^dotnet-.*' '^llvm-.*' 'php.*' 'google-chrome-stable' 'firefox' 'powershell' 'azure-cli' --fix-missing || true
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-          df -h /
-
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
         with:
@@ -79,6 +63,5 @@ jobs:
       - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: 
-LineageOS-8492A-Build
+          name: LineageOS-8492A-Build
           path: workspace/out/target/product/8492A/lineage-*.zip

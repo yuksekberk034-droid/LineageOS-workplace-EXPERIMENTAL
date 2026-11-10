@@ -2,91 +2,71 @@ name: Build LineageOS for TCL 8492A
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
-
-    env:
-      DEVICE: 8492A
-      LUNCH_TARGET: lineage_8492A-userdebug
-      MANIFEST_URL: https://github.com/LineageOS/android.git
-      MANIFEST_BRANCH: lineage-20.0
-      JAVA_VERSION: 17
-
+    
     steps:
-      - name: Maximize build space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo apt-get clean
-          docker rmi $(docker image ls -aq) || true
-          sudo swapoff -a || true
-          sudo rm -f /swapfile || true
+      - name: Checkout Builder Repository
+        uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bc bison build-essential ccache curl flex g++-multilib \
-            gcc-multilib git git-lfs gnupg gperf imagemagick \
-            lib32ncurses5-dev lib32readline-dev lib32z1-dev \
-            libelf-dev liblz4-tool libncurses5-dev libsdl1.2-dev \
-            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
-            schedutils squashfs-tools xsltproc zip zlib1g-dev \
-            python3 python3-pip openjdk-17-jdk -y
-
-      - name: Configure git
-        run: |
-          git config --global user.name "GitHub Actions"
+          sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3
+df -h /
+          
+          git config --global user.name "GitHub Action Builder"
           git config --global user.email "actions@github.com"
+          
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
 
-      - name: Install repo tool
+      - name: Initialize LineageOS Workspace
         run: |
-          mkdir -p "$HOME/bin"
-          curl https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
-          chmod a+x "$HOME/bin/repo"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
+          mkdir workspace
+          cd workspace
+          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1
+          
+          mkdir -p .repo/local_manifests
+          cp ../.github/manifests/8492A.xml .repo/local_manifests/
 
-      - name: Initialize LineageOS source
+      - name: Sync Source Code (Shallow)
         run: |
-          cd "$GITHUB_WORKSPACE"
-          mkdir -p lineage
-          cd lineage
-          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --git-lfs
+          cd workspace
+          ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+df -h /
 
-      - name: Sync source tree
-        run: |
-          cd "$GITHUB_WORKSPACE/lineage"
-          repo sync -c -j"$(nproc)" --force-sync --no-clone-bundle --no-tags
+      - name: Set Up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.14
+        with:
+          max-size: "10G"
 
-      - name: Clone this device tree into source tree
+      - name: Compile LineageOS
         run: |
-          cd "$GITHUB_WORKSPACE/lineage"
-          mkdir -p device/tcl
-          git clone https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git device/tcl/8492A
-
-      - name: Prepare build environment
-        run: |
-          cd "$GITHUB_WORKSPACE/lineage"
+          cd workspace
+          export USE_CCACHE=1
+          export CCACHE_EXEC=$(which ccache)
+          
           source build/envsetup.sh
-          lunch "$LUNCH_TARGET"
+          lunch lineage_8492A-userdebug
+          mka bacon -j$(nproc --all)
 
-      - name: Build
-        run: |
-          cd "$GITHUB_WORKSPACE/lineage"
-          source build/envsetup.sh
-          lunch "$LUNCH_TARGET"
-          make -j"$(nproc)" bacon 2>&1 | tee build.log
-
-      - name: Upload build artifacts
-        if: always()
+      - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: lineageos-${{ env.DEVICE }}-build
-          path: |
-            ${{ github.workspace }}/lineage/out/target/product/${{ env.DEVICE }}/
-            ${{ github.workspace }}/lineage/build.log
-          if-no-files-found: warn
+          name: LineageOS-8492A-Build
+          path: workspace/out/target/product/8492A/lineage-*.zip

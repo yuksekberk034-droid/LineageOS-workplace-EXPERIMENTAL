@@ -71,6 +71,10 @@ jobs:
         run: |
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
+          rm -rf prebuilts/gcc/linux-x86/host
+          rm -rf prebuilts/sdk/tools
+          rm -rf prebuilts/abi-dumps
+          rm -rf pdk
           df -h /
 
       - name: Compile LineageOS

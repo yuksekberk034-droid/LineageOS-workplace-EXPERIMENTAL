@@ -6,31 +6,34 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    
+    timeout-minutes: 360
+
     steps:
       - name: Checkout Builder Repository
         uses: actions/checkout@v4
 
-      - name: Direct System Space Cleanup
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Set up Swap Space (8GB)
         run: |
+          # Remove default swap from /mnt to free up the full 14GB secondary drive
           sudo swapoff -a || true
-          sudo rm -f /swapfile
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /var/lib/docker
-          sudo rm -rf /usr/share/swift
-          sudo apt-get clean
+          sudo rm -f /mnt/swapfile || true
           
-          # Re-allocate a lean 8GB swap file for memory spikes
+          # Create an 8GB swap on the main root drive
           sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          
-          df -h /
 
       - name: Install Build Dependencies
         run: |
@@ -41,13 +44,19 @@ jobs:
           git config --global user.email "actions@github.com"
           
           mkdir -p ~/bin
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
           chmod a+x ~/bin/repo
 
-      - name: Initialize LineageOS Workspace
+      - name: Split Storage & Initialize Workspace
         run: |
           mkdir workspace
           cd workspace
+          
+          # HARDWARE TRICK: Move the heavy .repo database to the secondary 14GB SSD
+          sudo mkdir -p /mnt/.repo
+          sudo chown -R $USER:$USER /mnt/.repo
+          ln -s /mnt/.repo .repo
+          
           ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1 --no-clone-bundle
           
           mkdir -p .repo/local_manifests
@@ -58,10 +67,11 @@ jobs:
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
           
-          # Delete legacy untracked host clang compiler (saves ~2GB without breaking manifest)
-          rm -rf prebuilts/clang/host/linux-x86/clang-3289846 || true
-          
+          # Confirm the split worked. /mnt should hold ~10-12GB, leaving ~45GB+ on /
+          echo "=== Root Partition (/) ==="
           df -h /
+          echo "=== Secondary SSD (/mnt) ==="
+          df -h /mnt
 
       - name: Compile LineageOS
         run: |

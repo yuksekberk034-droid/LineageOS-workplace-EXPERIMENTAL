@@ -75,6 +75,7 @@ jobs:
           rm -rf prebuilts/sdk/tools
           rm -rf prebuilts/abi-dumps
           rm -rf pdk
+find android/.repo/projects -name "*.git" -type d -exec rm -rf {} + 2>/dev/null || true
           df -h /
 
       - name: Compile LineageOS

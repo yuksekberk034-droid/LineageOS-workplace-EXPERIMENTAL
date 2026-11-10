@@ -76,7 +76,6 @@ jobs:
           rm -rf prebuilts/gcc/linux-x86/host
           rm -rf prebuilts/abi-dumps
           rm -rf prebuilts/clang/host/linux-x86/clang-3289846
-          rm -rf pdk
           
           # Safely delete git objects inside project trees while in workspace directory
           find .repo/projects -name "*.git" -type d -exec rm -rf {} + 2>/dev/null || true

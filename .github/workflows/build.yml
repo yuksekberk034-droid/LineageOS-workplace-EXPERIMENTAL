@@ -123,6 +123,16 @@ jobs:
           cd "$GITHUB_WORKSPACE/android"
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
+          
+      - name: Setup Compiler Cache (ccache)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          # The key changes every time so GitHub saves a fresh snapshot of your progress
+          key: lineage-ccache-${{ inputs.lineage_branch }}-${{ github.run_id }}
+          # Restore the progress from the most recent previous run
+          restore-keys: |
+            lineage-ccache-${{ inputs.lineage_branch }}-
 
       - name: Build LineageOS
         shell: bash
@@ -131,9 +141,15 @@ jobs:
           cd "$GITHUB_WORKSPACE/android"
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
-          # Use the swap space we created earlier
+          
+          # Enable ccache and limit its size to fit your space safely
+          export USE_CCACHE=1
+          export CCACHE_DIR=~/.cache/ccache
+          ccache -M 20G
+          
           export _JAVA_OPTIONS="-Xmx8g"
           mka bacon -j"${{ inputs.jobs }}"
+          
 
       - name: Upload build artifacts
         if: success()

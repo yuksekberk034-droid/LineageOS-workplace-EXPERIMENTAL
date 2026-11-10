@@ -9,10 +9,6 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Check the Storage
-        run: |
-          df -h /
-        
       - name: Checkout Builder Repository
         uses: actions/checkout@v4
 
@@ -29,17 +25,10 @@ jobs:
 
       - name: Set up Swap Space (8GB)
         run: |
-          # Remove default swap from /mnt to free up the full 14GB secondary drive
-          sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile || true
-          df -h /
-          
-          # Create an 8GB swap on the main root drive
           sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          df -h /
 
       - name: Install Build Dependencies
         run: |
@@ -52,34 +41,23 @@ jobs:
           mkdir -p ~/bin
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
           chmod a+x ~/bin/repo
-           df -h /
 
-      - name: Split Storage & Initialize Workspace
+      - name: Initialize LineageOS Workspace
         run: |
           mkdir workspace
           cd workspace
-          
-          # HARDWARE TRICK: Move the heavy .repo database to the secondary 14GB SSD
-          sudo mkdir -p /mnt/.repo
-          sudo chown -R $USER:$USER /mnt/.repo
-          ln -s /mnt/.repo .repo
-          
           ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1 --no-clone-bundle
           
           mkdir -p .repo/local_manifests
           cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
-          df -h /
 
       - name: Sync Source Code
         run: |
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
           
-          # Confirm the split worked. /mnt should hold ~10-12GB, leaving ~45GB+ on /
-          echo "=== Root Partition (/) ==="
+          echo "=== Available Space Before Compilation ==="
           df -h /
-          echo "=== Secondary SSD (/mnt) ==="
-          df -h /mnt
 
       - name: Compile LineageOS
         run: |
@@ -87,31 +65,15 @@ jobs:
           export TMPDIR="$PWD/tmp"
           mkdir -p "$TMPDIR"
           export USE_CCACHE=0
-          export _JAVA_OPTIONS="-Xmx4g"
+          
+          # Safe to allocate 8GB heap because of the 16GB runner RAM
+          export _JAVA_OPTIONS="-Xmx8g"
           
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
           
-          echo "=== Disk Space Before Nuclear Nuke ==="
-          df -h /
-          
-          # 1. Delete the entire git history database (Frees ~15GB instantly)
-          rm -rf .repo
-          
-          # 2. Trick the build system into passing the packaging phase
-          # The makefile runs: python3 .repo/repo/repo manifest -o - -r
-          mkdir -p .repo/repo
-          cat << 'EOF' > .repo/repo/repo
-          import sys
-          print('<?xml version="1.0" encoding="UTF-8"?>\n<manifest></manifest>')
-          EOF
-          
-          echo "=== Disk Space After Nuclear Nuke ==="
-          df -h /
-
-          # 3. Resume build with 30GB+ of available runway
-          mka bacon -j2
-          df -h /
+          # Compiling with all 4 cores
+          mka bacon -j$(nproc --all)
 
       - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4

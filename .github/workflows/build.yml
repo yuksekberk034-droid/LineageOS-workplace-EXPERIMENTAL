@@ -29,6 +29,7 @@ jobs:
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          df -h /
 
       - name: Install Build Dependencies
         run: |
@@ -41,6 +42,7 @@ jobs:
           mkdir -p ~/bin
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
           chmod a+x ~/bin/repo
+          df -h /
 
       - name: Initialize LineageOS Workspace
         run: |

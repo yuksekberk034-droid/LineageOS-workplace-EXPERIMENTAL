@@ -1,100 +1,84 @@
-name: Build LineageOS 20.0 for TCL 8492A
+name: Build LineageOS for TCL 8492A
 
 on:
   workflow_dispatch:
-    inputs:
-      BUILD_TYPE:
-        description: 'Build Type (user, userdebug, eng)'
-        required: true
-        default: 'userdebug'
-      CLEAN_BUILD:
-        description: 'Clean out dir before build'
-        type: boolean
-        default: false
 
 jobs:
   build:
-    name: Build LineageOS 20.0
-    # Use 'self-hosted' for a dedicated build machine, or a large runner
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Free Disk Space & Clean Environment
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: Checkout Builder Repository
+        uses: actions/checkout@v4
+
+      - name: Maximize Runner Disk Space
         run: |
-          # 1. Kill any existing apt locks or background update services
-          sudo killall apt apt-get unattended-upgrade 2>/dev/null || true
-          sudo rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /var/lib/docker
+          sudo rm -rf /usr/share/swift
+          sudo apt-get remove -y '^ghc-.*' '^dotnet-.*' '^llvm-.*' 'php.*' 'google-chrome-stable' 'firefox' 'powershell' 'azure-cli' --fix-missing || true
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          df -h /
 
-          # 2. Update and install packages completely non-interactively
-          sudo -E apt-get update -qq
-          sudo -E apt-get install -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-            bc bison build-essential ccache curl flex g++-multilib gcc-multilib git git-lfs \
-            gnupg gperf lib32ncurses5-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc \
-            zip zlib1g-dev openjdk-11-jdk python3 rsync
-
-          # 3. Setup target directory
-          sudo mkdir -p /mnt/build
-          sudo chown -R $USER:$USER /mnt/build
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          swap-size-mb: 12288
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
           
-      - name: Install Repo Tool
+      - name: Install Build Dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3
+          
+          git config --global user.name "GitHub Action Builder"
+          git config --global user.email "actions@github.com"
+          
           mkdir -p ~/bin
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
-          echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Configure Git
+      - name: Initialize LineageOS Workspace
         run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-
-      - name: Initialize LineageOS 20.0 Source
-        run: |
-          cd /mnt/build
-          repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --git-lfs --depth=1
-
-      - name: Add Local Manifests
-        run: |
-          cd /mnt/build
+          mkdir workspace
+          cd workspace
+          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1
+          
           mkdir -p .repo/local_manifests
-          cat << 'EOF' > .repo/local_manifests/tcl_8492A.xml
-          <?xml version="1.0" encoding="UTF-8"?>
-          <manifest>
-            <project path="device/tcl/8492A" name="${{ github.repository_owner }}/android_device_tcl_8492A" remote="github" revision="lineage-20.0" />
-            <project path="vendor/tcl/8492A" name="${{ github.repository_owner }}/android_vendor_tcl_8492A" remote="github" revision="lineage-20.0" />
-            <project path="kernel/tcl/8492A" name="${{ github.repository_owner }}/android_kernel_tcl_8492A" remote="github" revision="lineage-20.0" />
-          </manifest>
-          EOF
+          cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
 
-      - name: Sync Repositories
+      - name: Sync Source Code
         run: |
-          cd /mnt/build
-          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+          cd workspace
+          ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
 
-      - name: Set Up CCache
+      - name: Compile LineageOS
         run: |
-          echo "USE_CCACHE=1" >> $GITHUB_ENV
-          echo "CCACHE_EXEC=/usr/bin/ccache" >> $GITHUB_ENV
-          ccache -M 50G
-
-      - name: Build LineageOS
-        run: |
-          cd /mnt/build
-          if [ "${{ inputs.CLEAN_BUILD }}" = "true" ]; then
-            make clean
-          fi
+          cd workspace
+          export TMPDIR="$PWD/tmp"
+          mkdir -p "$TMPDIR"
+          export USE_CCACHE=0
+          export _JAVA_OPTIONS="-Xmx4g"
+          
           source build/envsetup.sh
-          lunch lineage_8492A-${{ inputs.BUILD_TYPE }}
-          mka bacon -j$(nproc --all)
+          lunch lineage_8492A-userdebug
+          mka bacon -j2
 
-      - name: Upload Output Artifacts
+      - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: LineageOS-20.0-TCL-8492A
-          path: |
-            /mnt/build/out/target/product/8492A/lineage-*.zip
-            /mnt/build/out/target/product/8492A/recovery.img
-            /mnt/build/out/target/product/8492A/boot.img
-          if-no-files-found: error
+          name: 
+LineageOS-8492A-Build
+          path: workspace/out/target/product/8492A/lineage-*.zip

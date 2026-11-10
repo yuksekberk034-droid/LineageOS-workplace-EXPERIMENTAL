@@ -80,13 +80,15 @@ jobs:
       - name: Compile LineageOS
         run: |
           cd workspace
+          mkdir -p tmp
+          export TMPDIR="$PWD/tmp"
           export USE_CCACHE=1
           export CCACHE_EXEC=$(which ccache)
-          df -h /
+          export _JAVA_OPTIONS="-Xmx4g"
           
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
-          mka bacon -j$(nproc --all)
+          mka bacon -j2
 
       - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4

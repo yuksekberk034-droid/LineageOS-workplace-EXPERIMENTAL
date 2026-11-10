@@ -32,16 +32,39 @@ jobs:
           path: device-tree
           fetch-depth: 1
 
+      - name: Nuclear Cleanup (Save ~30GB+)
+        run: |
+          # 1. Remove massive tool cache (CodeQL, Java, Go, PyPy, etc.)
+          sudo rm -rf /opt/hostedtoolcache
+          
+          # 2. Remove pre-installed Android SDKs (Lineage downloads its own)
+          sudo rm -rf /usr/local/lib/android
+          
+          # 3. Remove standard large packages
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/share/glade
+          sudo rm -rf /usr/local/.ghcup
+          
+          # 4. Prune Docker images (saves ~5GB)
+          sudo docker image prune --all --force
+
       - name: Maximize Runner Space & Add Swap
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 2048
-          swap-size-mb: 12288 # Creates a 12GB Swap file to prevent OOM
+          # Lower reserved root space to minimum (default is 1024)
+          root-reserve-mb: 512 
+          # Reduce temp reserve to minimum
+          temp-reserve-mb: 100 
+          # 12GB Swap is still needed for RAM safety
+          swap-size-mb: 12288 
+          # We already did manual cleanup, but these flags ensure LVM resizing works:
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
           remove-docker-images: 'true'
+          
 
       - name: Install build dependencies
         shell: bash

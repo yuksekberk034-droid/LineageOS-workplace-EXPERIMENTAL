@@ -9,9 +9,9 @@ on:
         default: lineage-20.0
         type: string
       jobs:
-        description: Number of parallel build jobs
+        description: Number of parallel build jobs (Default 2 for runner safety)
         required: true
-        default: "4"
+        default: "2"
         type: string
 
 permissions:
@@ -21,50 +21,24 @@ jobs:
   build:
     name: Build LineageOS
     runs-on: ubuntu-latest
-    # Maximum timeout for free runners is 360 mins (6 hours).
-    # If the build takes longer, you will need to implement ccache saving.
     timeout-minutes: 360
 
     steps:
-      - name: Check out device tree
+      - name: Check out builder repository
         uses: actions/checkout@v4
-        with:
-          path: device-tree
-          fetch-depth: 1
 
-      - name: Nuclear Cleanup (Save ~30GB+)
-        run: |
-          # 1. Remove massive tool cache (CodeQL, Java, Go, PyPy, etc.)
-          sudo rm -rf /opt/hostedtoolcache
-          
-          # 2. Remove pre-installed Android SDKs (Lineage downloads its own)
-          sudo rm -rf /usr/local/lib/android
-          
-          # 3. Remove standard large packages
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/share/glade
-          sudo rm -rf /usr/local/.ghcup
-          
-          # 4. Prune Docker images (saves ~5GB)
-          sudo docker image prune --all --force
-
+      # MUST BE FIRST: Maximizes disk space (~84GB) and sets up 12GB Swap natively
       - name: Maximize Runner Space & Add Swap
         uses: easimon/maximize-build-space@master
         with:
-          # Lower reserved root space to minimum (default is 1024)
-          root-reserve-mb: 512 
-          # Reduce temp reserve to minimum
-          temp-reserve-mb: 100 
-          # 12GB Swap is still needed for RAM safety
-          swap-size-mb: 12288 
-          # We already did manual cleanup, but these flags ensure LVM resizing works:
+          root-reserve-mb: 512
+          temp-reserve-mb: 100
+          swap-size-mb: 12288
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
           remove-docker-images: 'true'
-          
 
       - name: Install build dependencies
         shell: bash
@@ -94,62 +68,55 @@ jobs:
           set -euxo pipefail
           mkdir -p "$GITHUB_WORKSPACE/android"
           cd "$GITHUB_WORKSPACE/android"
-          # OPTIMIZATION: --depth=1 saves ~30GB of disk space
           repo init -u https://github.com/LineageOS/android.git -b "${{ inputs.lineage_branch }}" --git-lfs --depth=1
+
+          # Copy local manifest if present in repo
+          if [ -f "$GITHUB_WORKSPACE/.github/manifests/8492A.xml" ]; then
+            mkdir -p .repo/local_manifests
+            cp "$GITHUB_WORKSPACE/.github/manifests/8492A.xml" .repo/local_manifests/
+          fi
 
       - name: Sync LineageOS source
         shell: bash
         run: |
           set -euxo pipefail
           cd "$GITHUB_WORKSPACE/android"
-          # OPTIMIZATION: --no-tags and --optimized-fetch speed up sync
-          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune --force-sync -j8
+          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune --force-sync -j$(nproc --all)
 
-      - name: Copy device tree into source tree
+      - name: Clone Device and Vendor Repositories (Fallback)
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/android/device/tcl/8492A"
-          rsync -a --delete \
-            --exclude='.git/' \
-            --exclude='.github/' \
-            "$GITHUB_WORKSPACE/device-tree/" \
-            "$GITHUB_WORKSPACE/android/device/tcl/8492A/"
+          # Ensure Device Tree is present
+          if [ ! -d "$GITHUB_WORKSPACE/android/device/tcl/8492A" ]; then
+            git clone https://github.com/yuksekberk034-droid/android_device_tcl_8492A.git -b main "$GITHUB_WORKSPACE/android/device/tcl/8492A"
+          fi
 
-      - name: Prepare environment
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "$GITHUB_WORKSPACE/android"
-          source build/envsetup.sh
-          lunch lineage_8492A-userdebug
-          
-      - name: Setup Compiler Cache (ccache)
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ccache
-          # The key changes every time so GitHub saves a fresh snapshot of your progress
-          key: lineage-ccache-${{ inputs.lineage_branch }}-${{ github.run_id }}
-          # Restore the progress from the most recent previous run
-          restore-keys: |
-            lineage-ccache-${{ inputs.lineage_branch }}-
+          # Ensure Vendor Tree is present
+          if [ ! -d "$GITHUB_WORKSPACE/android/vendor/tcl/8492A" ]; then
+            git clone https://github.com/yuksekberk034-droid/android_vendor_tcl_8492A.git -b main "$GITHUB_WORKSPACE/android/vendor/tcl/8492A"
+          fi
 
       - name: Build LineageOS
         shell: bash
         run: |
           set -euxo pipefail
           cd "$GITHUB_WORKSPACE/android"
+          
+          # Set temporary build files inside workspace
+          export TMPDIR="$PWD/tmp"
+          mkdir -p "$TMPDIR"
+
+          # Disable ccache for first run to protect disk space
+          export USE_CCACHE=0
+          
+          # Cap Java heap to 4GB to prevent OOM thrashing on 7GB RAM runner
+          export _JAVA_OPTIONS="-Xmx4g"
+          
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
           
-          # Enable ccache and limit its size to fit your space safely
-          export USE_CCACHE=1
-          export CCACHE_DIR=~/.cache/ccache
-          ccache -M 20G
-          
-          export _JAVA_OPTIONS="-Xmx8g"
           mka bacon -j"${{ inputs.jobs }}"
-          
 
       - name: Upload build artifacts
         if: success()
@@ -157,8 +124,7 @@ jobs:
         with:
           name: lineage-8492A-${{ inputs.lineage_branch }}
           path: |
-            ${{ github.workspace }}/android/out/target/product/8492A/*.zip
-            ${{ github.workspace }}/android/out/target/product/8492A/*.img
+            ${{ github.workspace }}/android/out/target/product/8492A/lineage-*.zip
+            ${{ github.workspace }}/android/out/target/product/8492A/boot.img
           if-no-files-found: warn
           retention-days: 7
-          

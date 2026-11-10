@@ -42,15 +42,6 @@ jobs:
           sudo apt-get clean
           df -h /
 
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
-        with:
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-
       - name: Allocate Swap Space
         run: |
           # Turn off existing swap to unlock /swapfile

@@ -28,6 +28,8 @@ jobs:
           sudo rm -rf /usr/share/swift
           sudo docker image prune --all --force
           sudo apt-get clean
+          df -h /
+          
       - name: Purge System Bloat
         run: |
           sudo rm -rf /usr/share/dotnet

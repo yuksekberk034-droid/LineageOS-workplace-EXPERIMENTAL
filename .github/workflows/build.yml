@@ -80,21 +80,16 @@ jobs:
           export TMPDIR="$PWD/tmp"
           mkdir -p "$TMPDIR"
           export USE_CCACHE=0
-          
-          # Safe to allocate 8GB heap because of the 16GB runner RAM
           export _JAVA_OPTIONS="-Xmx8g"
           
-          # 1. Prepare environment FIRST
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
           
           echo "=== Space BEFORE Nuke ==="
           df -h /
           
-          # 2. Delete the repo AFTER lunch to free ~15GB
           rm -rf .repo
           
-          # 3. Create the dummy manifest script so Ninja doesn't crash at 99%
           mkdir -p .repo/repo
           cat << 'EOF' > .repo/repo/repo
           import sys
@@ -105,8 +100,12 @@ jobs:
           echo "=== Space AFTER Nuke ==="
           df -h /
           
-          # 4. Compile with all cores and the newly freed disk space
-          mka bacon -j$(nproc --all)
+          # CLEANUP: Delete the corrupted Java/Dex intermediates that caused the core dump
+          rm -rf out/soong/.intermediates/external/icu/
+          rm -rf out/soong/hiddenapi/
+          
+          # SAFETY: Throttle to 2 jobs for the final 3% to prevent RAM exhaustion
+          mka bacon -j2
 
       - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4

@@ -1,0 +1,8 @@
+# Miscellaneous
+product.abc=ok
+ro.com.google.acsa=true
+ro.com.google.gmsversion=13_202304
+ro.opa.eligible_device=true
+ro.setupwizard.rotation_locked=false
+setupwizard.phenotype_sync_timeout_ms=120000
+

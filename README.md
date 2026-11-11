@@ -8,4 +8,4 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 ```
-Warning! This build has not been tested and NOT recommended to install. Use it at your OWN risk.
+Warning! This build has not been tested and NOT been recommended to install. Use it at your OWN risk.

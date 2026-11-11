@@ -1,4 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest>
-    <project path="device/tcl/Freyr_10_1_WiFi" name="yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL" remote="github" revision="main" />
+    <remote name="github" fetch="https://github.com/" />
+
+    <!-- Your device tree -->
+    <project
+        path="device/tcl/Freyr_10_1_WiFi"
+        name="yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL"
+        remote="github"
+        revision="main" />
+
+    <!-- Add this only if you have a separate vendor repo for the device -->
+    <!-- Replace the name below with your actual vendor repo -->
+    <project
+        path="vendor/tcl/Freyr_10_1_WiFi"
+        name="YOUR_USERNAME/vendor_tcl_Freyr_10_1_WiFi"
+        remote="github"
+        revision="main" />
 </manifest>

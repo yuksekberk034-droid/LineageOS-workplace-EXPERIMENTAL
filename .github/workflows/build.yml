@@ -85,11 +85,6 @@ jobs:
           source build/envsetup.sh
           lunch lineage_Freyr_10_1_WiFi-userdebug
           
-          # THE FIX: Tell the build system to ignore missing hiddenapi dependencies
-          # This prevents the core-icu4j.jar core dump on newer Ubuntu versions
-          export DISABLE_HIDDENAPI_CHECKS=true
-          export IGNORE_HIDDENAPI_CHECK=true
-          
           echo "=== Space BEFORE Nuke ==="
           df -h /
           
@@ -104,9 +99,6 @@ jobs:
           
           echo "=== Space AFTER Nuke ==="
           df -h /
-          
-          # CLEANUP: Remove the failed intermediate file so it rebuilds cleanly
-          rm -f out/soong/hiddenapi/hiddenapi-stub-flags.txt
           
           # Proceed with the build using all cores
           mka bacon -j$(nproc --all)

@@ -83,7 +83,7 @@ jobs:
           export _JAVA_OPTIONS="-Xmx8g"
           
           source build/envsetup.sh
-          lunch lineage_8492A-userdebug
+          lineage_Freyr_10_1_WiFi-userdebug
           
           # THE FIX: Tell the build system to ignore missing hiddenapi dependencies
           # This prevents the core-icu4j.jar core dump on newer Ubuntu versions

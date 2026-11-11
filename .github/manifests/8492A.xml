@@ -1,9 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <manifest>
-  <remote name="github" fetch="https://github.com/" />
+  <remote name="tcl-github" fetch="https://github.com/" />
+
   <project path="device/tcl/Freyr_10_1_WiFi"
            name="yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL"
-           remote="github" revision="main" />
+           remote="tcl-github"
+           revision="main" />
+
   <project path="vendor/tcl/Freyr_10_1_WiFi"
            name="yuksekberk034-droid/TCL-8492A-Vendor-tree"
-           remote="github" revision="main" />
+           remote="tcl-github"
+           revision="main" />
 </manifest>

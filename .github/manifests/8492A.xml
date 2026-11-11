@@ -1,7 +1,4 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest>
-
-    <!-- Ensure repository names match your actual GitHub URLs -->
-    <project path="device/tcl/8492A" name="yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL" remote="github" revision="main" />
-    <!-- Remove kernel line if kernel source is prebuilt inside device tree -->
+    <project path="device/tcl/Freyr_10_1_WiFi" name="yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL" remote="github" revision="main" />
 </manifest>

@@ -73,6 +73,47 @@ jobs:
           
           echo "=== Available Space Before Compilation ==="
           df -h /
+
+          - name: Strip duplicate AOSP modules from vendor tree
+           run: |
+          python3 -c '
+          import os, re
+
+          bp_path = "vendor/tcl/Freyr_10_1_WiFi/Android.bp"
+          mk_path = "vendor/tcl/Freyr_10_1_WiFi/Freyr_10_1_WiFi-vendor.mk"
+
+          with open(bp_path) as f:
+              bp = f.read()
+
+          vendor_mods = set(re.findall(r"name:\s*\"([^\"]+)\"", bp))
+
+          # Scan all Android.bp files outside vendor/tcl
+          aosp_mods = set()
+          for root, dirs, files in os.walk("."):
+              if root.startswith("./out") or root.startswith("./vendor/tcl") or "/.git" in root:
+                  continue
+              if "Android.bp" in files:
+                  with open(os.path.join(root, "Android.bp"), errors="ignore") as f:
+                      aosp_mods.update(re.findall(r"name:\s*\"([^\"]+)\"", f.read()))
+
+          dups = sorted(vendor_mods & aosp_mods)
+          print(f"Found {len(dups)} duplicate modules:", dups)
+
+          for mod in dups:
+              bp = re.sub(r"\n\w+\s*\{\s*name:\s*\"" + re.escape(mod) + r"\"[\s\S]*?\n\}", "", bp)
+
+          with open(bp_path, "w") as f:
+              f.write(bp)
+
+          with open(mk_path) as f:
+              mk_lines = f.readlines()
+
+          with open(mk_path, "w") as f:
+              for line in mk_lines:
+                  if not any(re.search(r"\b" + re.escape(mod) + r"\b", line) for mod in dups):
+                      f.write(line)
+          '
+
           
       - name: Compile LineageOS
         run: |

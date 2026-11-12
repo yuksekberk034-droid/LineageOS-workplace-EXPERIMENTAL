@@ -170,7 +170,7 @@ jobs:
           export _JAVA_OPTIONS="-Xmx8g"
           
           source build/envsetup.sh
-          lunch lineage_Freyr_10_1_WiFi-userdebug
+          lunch lineage_8492A-userdebug
           
           echo "=== Space BEFORE Nuke ==="
           df -h /

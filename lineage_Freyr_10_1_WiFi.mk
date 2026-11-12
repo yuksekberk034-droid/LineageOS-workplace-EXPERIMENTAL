@@ -14,7 +14,7 @@ $(call inherit-product, device/tcl/Freyr_10_1_WiFi/device.mk)
 $(call inherit-product, vendor/lineage/config/common_full_phone.mk)
 
 PRODUCT_DEVICE := Freyr_10_1_WiFi
-PRODUCT_NAME := lineage_Freyr_10_1_WiFi
+PRODUCT_NAME := lineage_8492A
 PRODUCT_BRAND := TCL
 PRODUCT_MODEL := 8492A
 PRODUCT_MANUFACTURER := tcl

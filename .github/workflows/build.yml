@@ -23,7 +23,7 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      - name: Set up Swap Space (8GB)
+      - name: Set up Swap Space (12GB)
         run: |
           # Remove default swap from /mnt to free up the full 14GB secondary drive
           sudo swapoff -a || true
@@ -31,7 +31,7 @@ jobs:
           df -h /
           
           # Create an 8GB swap on the main root drive
-          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo fallocate -l 12G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=12288
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile

@@ -73,6 +73,93 @@ jobs:
           
           echo "=== Available Space Before Compilation ==="
           df -h /
+
+      - name: Auto-Deduplicate Vendor Tree
+        run: |
+          cd workspace
+          
+          # Create the deduplication script
+          cat << 'EOF' > auto_dedup.py
+          import os, subprocess, re, sys
+
+          VENDOR_DIR = "vendor/tcl/Freyr_10_1_WiFi"
+
+          def strip_bp(module):
+              for root, _, files in os.walk(VENDOR_DIR):
+                  if "Android.bp" in files:
+                      filepath = os.path.join(root, "Android.bp")
+                      with open(filepath, 'r') as f: data = f.read()
+                      
+                      # Find the exact name in the blueprint
+                      match = re.search(r'name:\s*"' + re.escape(module) + r'"', data)
+                      if match:
+                          # Walk backwards to find the start of the module block
+                          idx = data.rfind('{', 0, match.start())
+                          start = data.rfind('\n', 0, idx)
+                          if start == -1: start = 0
+                          
+                          # Count braces to find the exact end of the block
+                          braces = 0
+                          in_block = False
+                          for i in range(idx, len(data)):
+                              if data[i] == '{': braces += 1; in_block = True
+                              elif data[i] == '}':
+                                  braces -= 1
+                                  if in_block and braces == 0:
+                                      # Erase the entire block safely
+                                      with open(filepath, 'w') as f:
+                                          f.write(data[:start] + data[i+1:])
+                                      return True
+              return False
+
+          def strip_mk(module):
+              for root, _, files in os.walk(VENDOR_DIR):
+                  if "Android.mk" in files:
+                      filepath = os.path.join(root, "Android.mk")
+                      with open(filepath, 'r') as f: data = f.read()
+                      
+                      match = re.search(r'LOCAL_MODULE\s*:=\s*' + re.escape(module) + r'\b', data)
+                      if match:
+                          start = data.rfind('include $(CLEAR_VARS)', 0, match.start())
+                          if start == -1: return False
+                          end = data.find('include $(BUILD_PREBUILT)', match.end())
+                          if end == -1: return False
+                          end += len('include $(BUILD_PREBUILT)')
+                          
+                          with open(filepath, 'w') as f:
+                              f.write(data[:start] + data[end:])
+                          return True
+              return False
+
+          print("Starting automated duplicate removal loop...")
+          while True:
+              # mka nothing parses makefiles in ~15 seconds without building code
+              cmd = "source build/envsetup.sh && lunch lineage_8492A-userdebug && mka nothing"
+              process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, executable='/bin/bash')
+              output, _ = process.communicate()
+              output = output.decode('utf-8')
+              
+              if process.returncode == 0:
+                  print("\nSUCCESS: Makefiles parsed cleanly! No duplicates remaining.")
+                  break
+                  
+              # Match the exact duplicate name from the Kati error log
+              match = re.search(r'MODULE\.[A-Z_]+\.[A-Z_]+\.([^ ]+) already defined', output)
+              if match:
+                  module = match.group(1)
+                  if strip_bp(module) or strip_mk(module):
+                      print(f"Deleted conflicting prebuilt: {module}")
+                  else:
+                      print(f"\nERROR: Could not find {module} in vendor tree. Halting.")
+                      sys.exit(1)
+              else:
+                  print("\nMake failed for a non-duplicate reason:")
+                  print(output[-2000:]) # Output the end of the log
+                  sys.exit(1)
+          EOF
+          
+          # Execute the script
+          python3 auto_dedup.py
           
       - name: Compile LineageOS
         run: |

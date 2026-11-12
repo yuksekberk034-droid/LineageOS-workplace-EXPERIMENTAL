@@ -83,7 +83,8 @@ PRODUCT_COPY_FILES += \
 
 # Soong namespaces
 PRODUCT_SOONG_NAMESPACES += \
-    $(LOCAL_PATH)
+    $(LOCAL_PATH) \
+    vendor/tcl/Freyr_10_1_WiFi
 
 # Inherit the proprietary files
 $(call inherit-product, vendor/tcl/Freyr_10_1_WiFi/Freyr_10_1_WiFi-vendor.mk)

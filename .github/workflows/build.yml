@@ -36,7 +36,6 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
           df -h /
-
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
@@ -56,7 +55,6 @@ jobs:
           wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2_amd64.deb
           sudo dpkg -i libtinfo5_6.3-2_amd64.deb libncurses5_6.3-2_amd64.deb
           df -h /
-
       - name: Initialize LineageOS Workspace
         run: |
           mkdir workspace
@@ -73,137 +71,39 @@ jobs:
           
           echo "=== Available Space Before Compilation ==="
           df -h /
-
-      - name: Free Space (Nuclear Nuke)
-        run: |
-          cd workspace
-          echo "=== Nuking .repo Database BEFORE Deduplication ==="
-          # Free up the ~15GB Git history so 'mka nothing' has room to breathe
-          rm -rf .repo
           
-          # Trick the packaging script so the build doesn't crash at 99%
-          mkdir -p .repo/repo
-          
-          # ---> CRITICAL: Do not remove this 'cat' line! <---
-          cat << 'EOF' > .repo/repo/repo
-          import sys
-          print('<?xml version="1.0" encoding="UTF-8"?>\n<manifest></manifest>')
-          EOF
-          # ---> CRITICAL: Do not remove the 'EOF' line above! <---
-          
-          chmod +x .repo/repo/repo
-          
-          df -h /
-
-      - name: Auto-Deduplicate Vendor Tree
-        run: |
-          cd workspace
-          
-          cat << 'EOF' > auto_dedup.py
-          import os, subprocess, re, sys
-
-          SEARCH_DIRS = ["vendor/tcl", "device/tcl"]
-
-          def strip_bp(module):
-              for search_dir in SEARCH_DIRS:
-                  if not os.path.exists(search_dir): continue
-                  for root, _, files in os.walk(search_dir):
-                      if "Android.bp" in files:
-                          filepath = os.path.join(root, "Android.bp")
-                          with open(filepath, 'r') as f: data = f.read()
-                          
-                          match = re.search(r'name:\s*"' + re.escape(module) + r'"', data)
-                          if match:
-                              idx = data.rfind('{', 0, match.start())
-                              start = data.rfind('\n', 0, idx)
-                              if start == -1: start = 0
-                              
-                              braces = 0
-                              in_block = False
-                              for i in range(idx, len(data)):
-                                  if data[i] == '{': braces += 1; in_block = True
-                                  elif data[i] == '}':
-                                      braces -= 1
-                                      if in_block and braces == 0:
-                                          with open(filepath, 'w') as f:
-                                              f.write(data[:start] + data[i+1:])
-                                          return True
-              return False
-
-          def strip_mk(module):
-              for search_dir in SEARCH_DIRS:
-                  if not os.path.exists(search_dir): continue
-                  for root, _, files in os.walk(search_dir):
-                      if "Android.mk" in files:
-                          filepath = os.path.join(root, "Android.mk")
-                          with open(filepath, 'r') as f: data = f.read()
-                          
-                          match = re.search(r'LOCAL_MODULE\s*:=\s*' + re.escape(module) + r'\b', data)
-                          if match:
-                              start = data.rfind('include $(CLEAR_VARS)', 0, match.start())
-                              if start == -1: return False
-                              end = data.find('include $(BUILD_PREBUILT)', match.end())
-                              if end == -1: return False
-                              end += len('include $(BUILD_PREBUILT)')
-                              
-                              with open(filepath, 'w') as f:
-                                  f.write(data[:start] + data[end:])
-                              return True
-              return False
-
-          print("Starting automated duplicate removal loop...")
-          while True:
-              # Inject hiddenapi bypasses directly into the parsing command
-              cmd = "export DISABLE_HIDDENAPI_CHECKS=true && export IGNORE_HIDDENAPI_CHECK=true && source build/envsetup.sh && lunch lineage_8492A-userdebug && mka nothing"
-              process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, executable='/bin/bash')
-              output, _ = process.communicate()
-              output = output.decode('utf-8')
-              
-              if process.returncode == 0:
-                  print("\nSUCCESS: Makefiles parsed cleanly! No duplicates remaining.")
-                  os.system("rm -rf out/")
-                  break
-                  
-              match = re.search(r'MODULE\.[A-Z_]+\.[A-Z_]+\.([^ ]+) already defined', output)
-              if match:
-                  module = match.group(1)
-                  if strip_bp(module) or strip_mk(module):
-                      print(f"Deleted conflicting prebuilt: {module}")
-                      # Purge the out/ cache instantly to keep disk space free
-                      os.system("rm -rf out/")
-                  else:
-                      print(f"\nERROR: Could not find {module} in vendor or device tree.")
-                      sys.exit(1)
-              else:
-                  print("\nMake failed for a non-duplicate reason:")
-                  print(output[-2000:])
-                  sys.exit(1)
-          EOF
-          
-          python3 auto_dedup.py
-
       - name: Compile LineageOS
         run: |
           cd workspace
-          
           export TMPDIR="$PWD/tmp"
           mkdir -p "$TMPDIR"
           export USE_CCACHE=0
           export _JAVA_OPTIONS="-Xmx8g"
           
-          export DISABLE_HIDDENAPI_CHECKS=true
-          export IGNORE_HIDDENAPI_CHECK=true
-          
           source build/envsetup.sh
-          lunch lineage_8492A-userdebug
+          lunch lineage_Freyr_10_1_WiFi-userdebug
           
-          echo "=== Space Before Final Build ==="
+          echo "=== Space BEFORE Nuke ==="
           df -h /
           
+          rm -rf .repo
+          
+          mkdir -p .repo/repo
+          cat << 'EOF' > .repo/repo/repo
+          import sys
+          print('<?xml version="1.0" encoding="UTF-8"?>\n<manifest></manifest>')
+          EOF
+          chmod +x .repo/repo/repo
+          
+          echo "=== Space AFTER Nuke ==="
+          df -h /
+          
+          # Proceed with the build using all cores
           mka bacon -j$(nproc --all)
-
+          df -h /
+          
       - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4
         with:
           name: LineageOS-8492A-Build
-          path: workspace/out/target/product/8492A/lineage-*.zip
+          path: workspace/out/target/product/Lineage_8492A/lineage-*.zip

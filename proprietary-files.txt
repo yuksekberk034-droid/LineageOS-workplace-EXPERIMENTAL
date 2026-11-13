@@ -72,7 +72,6 @@ system_ext/etc/audio_policy_engine_stream_volumes.xml
 system_ext/etc/audio_policy_volumes.xml
 system_ext/etc/bluetooth_audio_policy_configuration.xml
 system_ext/etc/default_volume_tables.xml
-system_ext/etc/default_volume_tables.xml
 system_ext/etc/hearing_aid_audio_policy_configuration.xml
 system_ext/etc/r_submix_audio_policy_configuration.xml
 system_ext/etc/usb_audio_policy_configuration.xml
@@ -722,7 +721,6 @@ vendor/lib/libMtkOmxCore.so
 vendor/lib/libMtkOmxGsmDec.so
 vendor/lib/libMtkOmxMp3Dec.so
 vendor/lib/libadpcmdec_mtk.so
-vendor/lib/libcodec2_hidl@1.1.so
 vendor/lib/libcodec2_hidl@1.2.so
 vendor/lib/libcodec2_hidl_plugin.so
 vendor/lib/libcodec2_mtk_c2store.so
@@ -739,7 +737,6 @@ vendor/lib/libstagefright_softomx_plugin.so
 vendor/lib/libstagefrighthw.so
 vendor/lib64/libMtkOmxCore.so
 vendor/lib64/libadpcmdec_mtk.so
-vendor/lib64/libcodec2_hidl@1.1.so
 vendor/lib64/libcodec2_hidl@1.2.so
 vendor/lib64/libcodec2_hidl_plugin.so
 vendor/lib64/libcodec2_mtk_c2store.so
@@ -1476,10 +1473,6 @@ vendor/lib64/vendor.mediatek.hardware.dmc@1.2.so
 vendor/lib64/vendor.mediatek.hardware.lbs@1.0.so
 vendor/lib64/vendor.mediatek.hardware.log@1.0.so
 vendor/lib64/vendor.mediatek.hardware.mdmonitor@1.0.so
-vendor/odm/etc/vintf/manifest_dsds.xml
-vendor/odm/etc/vintf/manifest_qsqs.xml
-vendor/odm/etc/vintf/manifest_ss.xml
-vendor/odm/etc/vintf/manifest_tsts.xml
 vendor/res/images/lcd_test_00.png
 vendor/res/images/lcd_test_01.png
 vendor/res/images/lcd_test_02.png

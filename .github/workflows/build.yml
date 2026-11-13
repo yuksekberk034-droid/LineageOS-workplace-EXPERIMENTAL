@@ -74,10 +74,8 @@ jobs:
           echo "=== Available Space Before Compilation ==="
           df -h /
 
-      
-      
-          - name: Free Space (Nuclear Nuke)
-          run: |
+      - name: Free Space (Nuclear Nuke)
+        run: |
           cd workspace
           echo "=== Nuking .repo Database BEFORE Deduplication ==="
           # Free up the ~15GB Git history so 'mka nothing' has room to breathe
@@ -85,10 +83,14 @@ jobs:
           
           # Trick the packaging script so the build doesn't crash at 99%
           mkdir -p .repo/repo
+          
+          # ---> CRITICAL: Do not remove this 'cat' line! <---
           cat << 'EOF' > .repo/repo/repo
           import sys
           print('<?xml version="1.0" encoding="UTF-8"?>\n<manifest></manifest>')
           EOF
+          # ---> CRITICAL: Do not remove the 'EOF' line above! <---
+          
           chmod +x .repo/repo/repo
           
           df -h /

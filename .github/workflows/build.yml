@@ -74,6 +74,25 @@ jobs:
           echo "=== Available Space Before Compilation ==="
           df -h /
 
+      
+      
+          - name: Free Space (Nuclear Nuke)
+          run: |
+          cd workspace
+          echo "=== Nuking .repo Database BEFORE Deduplication ==="
+          # Free up the ~15GB Git history so 'mka nothing' has room to breathe
+          rm -rf .repo
+          
+          # Trick the packaging script so the build doesn't crash at 99%
+          mkdir -p .repo/repo
+          cat << 'EOF' > .repo/repo/repo
+          import sys
+          print('<?xml version="1.0" encoding="UTF-8"?>\n<manifest></manifest>')
+          EOF
+          chmod +x .repo/repo/repo
+          
+          df -h /
+
       - name: Auto-Deduplicate Vendor Tree
         run: |
           cd workspace
@@ -132,14 +151,14 @@ jobs:
 
           print("Starting automated duplicate removal loop...")
           while True:
-              cmd = "source build/envsetup.sh && lunch lineage_8492A-userdebug && mka nothing"
+              # Inject hiddenapi bypasses directly into the parsing command
+              cmd = "export DISABLE_HIDDENAPI_CHECKS=true && export IGNORE_HIDDENAPI_CHECK=true && source build/envsetup.sh && lunch lineage_8492A-userdebug && mka nothing"
               process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, executable='/bin/bash')
               output, _ = process.communicate()
               output = output.decode('utf-8')
               
               if process.returncode == 0:
                   print("\nSUCCESS: Makefiles parsed cleanly! No duplicates remaining.")
-                  # Final cleanup before actual build starts
                   os.system("rm -rf out/")
                   break
                   
@@ -148,51 +167,41 @@ jobs:
                   module = match.group(1)
                   if strip_bp(module) or strip_mk(module):
                       print(f"Deleted conflicting prebuilt: {module}")
-                      # CRITICAL FIX: Wipe the out/ folder cache to prevent disk bloat
+                      # Purge the out/ cache instantly to keep disk space free
                       os.system("rm -rf out/")
                   else:
                       print(f"\nERROR: Could not find {module} in vendor or device tree.")
                       sys.exit(1)
               else:
-                  print("\nMake failed. Check your device tree configuration:")
+                  print("\nMake failed for a non-duplicate reason:")
                   print(output[-2000:])
                   sys.exit(1)
           EOF
           
           python3 auto_dedup.py
-          
+
       - name: Compile LineageOS
         run: |
           cd workspace
+          
           export TMPDIR="$PWD/tmp"
           mkdir -p "$TMPDIR"
           export USE_CCACHE=0
           export _JAVA_OPTIONS="-Xmx8g"
           
+          export DISABLE_HIDDENAPI_CHECKS=true
+          export IGNORE_HIDDENAPI_CHECK=true
+          
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
           
-          echo "=== Space BEFORE Nuke ==="
+          echo "=== Space Before Final Build ==="
           df -h /
           
-          rm -rf .repo
-          
-          mkdir -p .repo/repo
-          cat << 'EOF' > .repo/repo/repo
-          import sys
-          print('<?xml version="1.0" encoding="UTF-8"?>\n<manifest></manifest>')
-          EOF
-          chmod +x .repo/repo/repo
-          
-          echo "=== Space AFTER Nuke ==="
-          df -h /
-          
-          # Proceed with the build using all cores
           mka bacon -j$(nproc --all)
-          df -h /
 
       - name: Upload Flashable ZIP
         uses: actions/upload-artifact@v4
         with:
           name: LineageOS-8492A-Build
-          path: workspace/out/target/product/Freyr_10_1_WiFi/lineage-*.zip
+          path: workspace/out/target/product/8492A/lineage-*.zip

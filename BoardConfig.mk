@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-DEVICE_PATH := device/tcl/8492A
+DEVICE_PATH := device/tcl/Freyr_10_1_WiFi
 
 # A/B
 AB_OTA_UPDATER := true

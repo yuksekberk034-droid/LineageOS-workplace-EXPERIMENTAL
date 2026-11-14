@@ -111,33 +111,53 @@ jobs:
           mk_path = "out/soong/installs-lineage_8492A.mk"
           bp_path = "vendor/tcl/Freyr_10_1_WiFi/Android.bp"
 
+          def extract_soong_module(deps_str, vendor_only=False):
+              for token in deps_str.split():
+                  if not token.startswith("out/soong/.intermediates/"):
+                      continue
+                  is_vendor = token.startswith("out/soong/.intermediates/vendor/tcl/Freyr_10_1_WiFi/")
+                  if vendor_only != is_vendor:
+                      continue
+                  m = re.search(r"out/soong/\.intermediates/.+/([^/]+)/(?:android|linux)_[^/]+/", token)
+                  if m:
+                      return m.group(1)
+                  parts = token.split("/")
+                  if len(parts) >= 4:
+                      return parts[-3]
+              return None
+
           if os.path.exists(mk_path):
               targets = defaultdict(list)
               with open(mk_path, "r", encoding="utf-8", errors="ignore") as f:
                   for lineno, line in enumerate(f, 1):
-                      if ":" in line and not line.lstrip().startswith(("#", "\t", " ")):
+                      if line.startswith(("out/target/product/", "$(PRODUCT_OUT)/")) and ":" in line:
                           target, _, deps = line.partition(":")
-                          target = target.strip()
-                          if target and not target.startswith(".") and "=" not in target:
-                              targets[target].append((lineno, deps.strip()))
+                          targets[target.strip()].append((lineno, deps.strip()))
 
               dups = {t: entries for t, entries in targets.items() if len(entries) > 1}
               print(f"Found {len(dups)} duplicate install target(s):")
 
               modules_to_remove = set()
+              rename_map = {}
+
               for target, entries in sorted(dups.items()):
                   print(f"\nTARGET: {target}")
+                  vendor_mod = None
+                  lineage_mod = None
                   for lineno, deps in entries:
                       print(f"  Line {lineno}: {deps}")
-                      m = re.search(r"out/soong/\.intermediates/vendor/tcl/Freyr_10_1_WiFi/([^/]+)/", deps)
-                      if m:
-                          modules_to_remove.add(m.group(1))
+                      v = extract_soong_module(deps, vendor_only=True)
+                      l = extract_soong_module(deps, vendor_only=False)
+                      if v:
+                          vendor_mod = v
+                      if l:
+                          lineage_mod = l
+                  if vendor_mod:
+                      modules_to_remove.add(vendor_mod)
+                      if lineage_mod and lineage_mod != vendor_mod:
+                          rename_map[vendor_mod] = lineage_mod
 
-              if modules_to_remove and os.path.exists(bp_path):
-                  print("\nRemoving colliding blocks from vendor Android.bp:")
-                  for mod in sorted(modules_to_remove):
-                      print(f"  - {mod}")
-
+              if (modules_to_remove or rename_map) and os.path.exists(bp_path):
                   with open(bp_path, "r", encoding="utf-8") as f:
                       lines = f.readlines()
 
@@ -154,10 +174,15 @@ jobs:
                           block = []
                   out_lines.extend(block)
 
-                  with open(bp_path, "w", encoding="utf-8") as f:
-                      f.writelines(out_lines)
+                  bp_text = "".join(out_lines)
+                  for old_mod, new_mod in sorted(rename_map.items()):
+                      print(f'Renaming dependency: "{old_mod}" -> "{new_mod}"')
+                      bp_text = bp_text.replace(f'"{old_mod}"', f'"{new_mod}"')
 
-                  print(f"Removed {removed} colliding module block(s).")
+                  with open(bp_path, "w", encoding="utf-8") as f:
+                      f.write(bp_text)
+
+                  print(f"Removed {removed} colliding block(s) and updated {len(rename_map)} dependency name(s).")
           EOF
           
           # Proceed with the build using all cores

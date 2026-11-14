@@ -100,7 +100,7 @@ jobs:
           echo "=== Space AFTER Nuke ==="
           df -h /
 
-          echo "=== Scanning & Purging Install-Path Collisions ==="
+          echo "=== Scanning & Purging Soong + PRODUCT_COPY_FILES Collisions ==="
           mka nothing || true
 
           python3 - << 'EOF'
@@ -110,6 +110,21 @@ jobs:
 
           mk_path = "out/soong/installs-lineage_8492A.mk"
           bp_path = "vendor/tcl/Freyr_10_1_WiFi/Android.bp"
+
+          def normalize_install_path(path):
+              p = path.strip()
+              p = re.sub(r"^(?:out/target/product/[^/]+|\$\(PRODUCT_OUT\))/", "", p)
+              replacements = {
+                  "$(TARGET_COPY_OUT_VENDOR)": "vendor",
+                  "$(TARGET_COPY_OUT_SYSTEM)": "system",
+                  "$(TARGET_COPY_OUT_SYSTEM_EXT)": "system_ext",
+                  "$(TARGET_COPY_OUT_PRODUCT)": "product",
+                  "$(TARGET_COPY_OUT_ODM)": "odm",
+              }
+              for k, v in replacements.items():
+                  p = p.replace(k, v)
+              p = re.sub(r"^system/(vendor|product|system_ext|odm)/", r"\1/", p)
+              return p
 
           def extract_soong_module(deps_str, vendor_only=False):
               for token in deps_str.split():
@@ -126,16 +141,20 @@ jobs:
                       return parts[-3]
               return None
 
+          soong_targets = set()
+
           if os.path.exists(mk_path):
               targets = defaultdict(list)
               with open(mk_path, "r", encoding="utf-8", errors="ignore") as f:
                   for lineno, line in enumerate(f, 1):
                       if line.startswith(("out/target/product/", "$(PRODUCT_OUT)/")) and ":" in line:
                           target, _, deps = line.partition(":")
-                          targets[target.strip()].append((lineno, deps.strip()))
+                          t_clean = target.strip()
+                          targets[t_clean].append((lineno, deps.strip()))
+                          soong_targets.add(normalize_install_path(t_clean))
 
               dups = {t: entries for t, entries in targets.items() if len(entries) > 1}
-              print(f"Found {len(dups)} duplicate install target(s):")
+              print(f"Found {len(dups)} Soong-vs-Soong duplicate install target(s):")
 
               modules_to_remove = set()
               rename_map = {}
@@ -182,7 +201,73 @@ jobs:
                   with open(bp_path, "w", encoding="utf-8") as f:
                       f.write(bp_text)
 
-                  print(f"Removed {removed} colliding block(s) and updated {len(rename_map)} dependency name(s).")
+                  print(f"Removed {removed} colliding Android.bp block(s) and updated {len(rename_map)} dependency name(s).")
+
+          # Purge PRODUCT_COPY_FILES entries in device/tcl and vendor/tcl that collide with Soong
+          seen_copy_dests = set(soong_targets)
+          for search_dir in ("device/tcl", "vendor/tcl"):
+              if not os.path.exists(search_dir):
+                  continue
+              for root, _, files in os.walk(search_dir):
+                  for fname in files:
+                      if not fname.endswith(".mk"):
+                          continue
+                      fpath = os.path.join(root, fname)
+                      with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                          raw_lines = f.readlines()
+
+                      new_lines = []
+                      i = 0
+                      changed = False
+                      while i < len(raw_lines):
+                          line = raw_lines[i]
+                          m_hdr = re.match(r"^(\s*PRODUCT_COPY_FILES\s*(?:\+=|:=|=))(.*)$", line)
+                          if not m_hdr:
+                              new_lines.append(line)
+                              i += 1
+                              continue
+
+                          stmt_lines = [line]
+                          while stmt_lines[-1].rstrip("\r\n").endswith("\\") and i + 1 < len(raw_lines):
+                              i += 1
+                              stmt_lines.append(raw_lines[i])
+                          i += 1
+
+                          joined = ""
+                          for sl in stmt_lines:
+                              sl_nocomment = re.sub(r"#.*$", "", sl.rstrip("\r\n"))
+                              if sl_nocomment.endswith("\\"):
+                                  joined += sl_nocomment[:-1] + " "
+                              else:
+                                  joined += sl_nocomment + " "
+
+                          m_full = re.match(r"^(\s*PRODUCT_COPY_FILES\s*(?:\+=|:=|=))(.*)$", joined)
+                          header = m_full.group(1)
+                          tokens = m_full.group(2).split()
+
+                          kept = []
+                          for tok in tokens:
+                              if ":" not in tok:
+                                  kept.append(tok)
+                                  continue
+                              _, _, dst = tok.partition(":")
+                              norm_dst = normalize_install_path(dst)
+                              if norm_dst in seen_copy_dests:
+                                  print(f"Removed duplicate PRODUCT_COPY_FILES in {fpath}: {tok}")
+                                  changed = True
+                              else:
+                                  seen_copy_dests.add(norm_dst)
+                                  kept.append(tok)
+
+                          if kept:
+                              new_lines.append(f"{header} \\\n")
+                              for idx, tok in enumerate(kept):
+                                  suffix = " \\\n" if idx < len(kept) - 1 else "\n"
+                                  new_lines.append(f"    {tok}{suffix}")
+
+                      if changed:
+                          with open(fpath, "w", encoding="utf-8") as f:
+                              f.writelines(new_lines)
           EOF
           
           # Proceed with the build using all cores

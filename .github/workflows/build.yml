@@ -36,6 +36,7 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
           df -h /
+
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
@@ -55,6 +56,7 @@ jobs:
           wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2_amd64.deb
           sudo dpkg -i libtinfo5_6.3-2_amd64.deb libncurses5_6.3-2_amd64.deb
           df -h /
+
       - name: Initialize LineageOS Workspace
         run: |
           mkdir workspace
@@ -97,6 +99,66 @@ jobs:
           
           echo "=== Space AFTER Nuke ==="
           df -h /
+
+          echo "=== Scanning & Purging Install-Path Collisions ==="
+          mka nothing || true
+
+          python3 - << 'EOF'
+          import os
+          import re
+          from collections import defaultdict
+
+          mk_path = "out/soong/installs-lineage_8492A.mk"
+          bp_path = "vendor/tcl/Freyr_10_1_WiFi/Android.bp"
+
+          if os.path.exists(mk_path):
+              targets = defaultdict(list)
+              with open(mk_path, "r", encoding="utf-8", errors="ignore") as f:
+                  for lineno, line in enumerate(f, 1):
+                      if ":" in line and not line.lstrip().startswith(("#", "\t", " ")):
+                          target, _, deps = line.partition(":")
+                          target = target.strip()
+                          if target and not target.startswith(".") and "=" not in target:
+                              targets[target].append((lineno, deps.strip()))
+
+              dups = {t: entries for t, entries in targets.items() if len(entries) > 1}
+              print(f"Found {len(dups)} duplicate install target(s):")
+
+              modules_to_remove = set()
+              for target, entries in sorted(dups.items()):
+                  print(f"\nTARGET: {target}")
+                  for lineno, deps in entries:
+                      print(f"  Line {lineno}: {deps}")
+                      m = re.search(r"out/soong/\.intermediates/vendor/tcl/Freyr_10_1_WiFi/([^/]+)/", deps)
+                      if m:
+                          modules_to_remove.add(m.group(1))
+
+              if modules_to_remove and os.path.exists(bp_path):
+                  print("\nRemoving colliding blocks from vendor Android.bp:")
+                  for mod in sorted(modules_to_remove):
+                      print(f"  - {mod}")
+
+                  with open(bp_path, "r", encoding="utf-8") as f:
+                      lines = f.readlines()
+
+                  out_lines, block, braces, removed = [], [], 0, 0
+                  for line in lines:
+                      block.append(line)
+                      braces += line.count("{") - line.count("}")
+                      if braces == 0 and any(l.strip() for l in block):
+                          block_text = "".join(block)
+                          if any(f'name: "{mod}"' in block_text for mod in modules_to_remove):
+                              removed += 1
+                          else:
+                              out_lines.extend(block)
+                          block = []
+                  out_lines.extend(block)
+
+                  with open(bp_path, "w", encoding="utf-8") as f:
+                      f.writelines(out_lines)
+
+                  print(f"Removed {removed} colliding module block(s).")
+          EOF
           
           # Proceed with the build using all cores
           mka bacon -j$(nproc --all)
@@ -106,4 +168,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LineageOS-8492A-Build
-          path: workspace/out/target/product/Lineage_8492A/lineage-*.zip
+          path: workspace/out/target/product/*/lineage-*.zip

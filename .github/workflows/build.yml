@@ -33,34 +33,9 @@ jobs:
           sudo swapon /mnt/swapfile
           df -h / /mnt
 
-      - name: Install Build Dependencies & SSHFS
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 sshfs
-
-          git config --global user.name "GitHub Action Builder"
-          git config --global user.email "actions@github.com"
-
-          mkdir -p ~/bin
-          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
-          chmod a+x ~/bin/repo
-
-      - name: Inject Legacy libncurses5 for Ubuntu 24.04
-        run: |
-          cd /tmp
-          wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2_amd64.deb
-          wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2_amd64.deb
-          sudo dpkg -i libtinfo5_6.3-2_amd64.deb libncurses5_6.3-2_amd64.deb
-
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v2
-        with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-          args: --accept-routes
-
       - name: Write SSH Private Key
         env:
-         REMOTE_SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
+          REMOTE_SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh workspace/out
           python3 - << 'EOF'
@@ -68,52 +43,52 @@ jobs:
 
           raw = os.environ["REMOTE_SSH_KEY"].strip()
           if raw.startswith("-----BEGIN"):
-              data = (raw.replace("\r\n", "\n") + "\n").encode("utf-8")
+             data = (raw.replace("\r\n", "\n") + "\n").encode("utf-8")
           else:
-              data = base64.b64decode("".join(raw.split()))
+               data = base64.b64decode("".join(raw.split()))
 
           key_path = os.path.expanduser("~/.ssh/id_ed25519")
           with open(key_path, "wb") as f:
-              f.write(data)
+               f.write(data)
           os.chmod(key_path, 0o600)
           EOF
           ssh-keygen -y -f "$HOME/.ssh/id_ed25519" > /dev/null
-
+ 
       - name: Mount Local 110GB Drive for /out
         run: |
-         echo "=== Warming up Tailscale tunnel to ${{ secrets.REMOTE_HOST }} ==="
+          echo "=== Warming up Tailscale tunnel to ${{ secrets.REMOTE_HOST }} ==="
           tailscale status
           tailscale ping --until-direct=false --timeout=30s --c=3 "${{ secrets.REMOTE_HOST }}" || true
 
-         echo "=== Verifying SSH Handshake ==="
-         ssh -i "$HOME/.ssh/id_ed25519" \
-           -o StrictHostKeyChecking=no \
-           -o UserKnownHostsFile=/dev/null \
-           -o ConnectTimeout=30 \
-           "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" "echo SSH_HANDSHAKE_OK"
+          echo "=== Verifying SSH Handshake ==="
+          ssh -i "$HOME/.ssh/id_ed25519" \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o ConnectTimeout=30 \
+          "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" "echo SSH_HANDSHAKE_OK"
 
-         sshfs "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
-           "$PWD/workspace/out" \
-          -o IdentityFile="$HOME/.ssh/id_ed25519" \
-           -o StrictHostKeyChecking=no \
-           -o UserKnownHostsFile=/dev/null \
-           -o TCPKeepAlive=yes \
-           -o ServerAliveInterval=15 \
-           -o ServerAliveCountMax=6 \
-           -o ConnectTimeout=30 \
-           -o reconnect \
-           -o cache=yes \
-           -o kernel_cache \
-           -o auto_cache \
-           -o entry_timeout=120 \
-           -o attr_timeout=120 \
-           -o ac_attr_timeout=120 \
-           -o negative_timeout=120 \
-           -o compression=yes \
-           -o Ciphers=aes128-gcm@openssh.com
+          sshfs "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
+            "$PWD/workspace/out" \
+            -o IdentityFile="$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o TCPKeepAlive=yes \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=6 \
+            -o ConnectTimeout=30 \
+            -o reconnect \
+            -o cache=yes \
+            -o kernel_cache \
+            -o auto_cache \
+            -o entry_timeout=120 \
+            -o attr_timeout=120 \
+            -o ac_attr_timeout=120 \
+            -o negative_timeout=120 \
+            -o compression=yes \
+            -o Ciphers=aes128-gcm@openssh.com
 
-         echo "=== Mounted Remote /out Storage ==="
-         df -h "$PWD/workspace/out"
+          echo "=== Mounted Remote /out Storage ==="
+          df -h "$PWD/workspace/out"
 
       - name: Initialize LineageOS Workspace
         run: |

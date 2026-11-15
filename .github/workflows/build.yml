@@ -31,6 +31,8 @@ jobs:
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
+          swapon --show
+          free -h
           df -h / /mnt
 
       - name: Install Build Dependencies & SSHFS
@@ -58,42 +60,56 @@ jobs:
           authkey: ${{ secrets.TS_AUTHKEY }}
           args: --accept-routes
 
-
       - name: Write SSH Private Key
         env:
           REMOTE_SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh workspace/out
           python3 - << 'EOF'
-          import base64, os
+          import base64, os, re
 
-          raw = os.environ["REMOTE_SSH_KEY"].strip()
-          if raw.startswith("-----BEGIN"):
-             data = (raw.replace("\r\n", "\n") + "\n").encode("utf-8")
+          raw = os.environ.get("REMOTE_SSH_KEY", "").strip()
+          if not raw:
+              raise SystemExit("ERROR: REMOTE_SSH_KEY secret is empty")
+
+          if "BEGIN OPENSSH PRIVATE KEY" in raw:
+              body = re.sub(r"-----BEGIN OPENSSH PRIVATE KEY-----|-----END OPENSSH PRIVATE KEY-----", "", raw)
+              b64_clean = "".join(body.split())
+              lines = [b64_clean[i:i+70] for i in range(0, len(b64_clean), 70)]
+              data = ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + "\n".join(lines) + "\n-----END OPENSSH PRIVATE KEY-----\n").encode("utf-8")
           else:
-               data = base64.b64decode("".join(raw.split()))
+              b64_clean = "".join(raw.split())
+              b64_clean += "=" * ((4 - len(b64_clean) % 4) % 4)
+              data = base64.b64decode(b64_clean)
 
           key_path = os.path.expanduser("~/.ssh/id_ed25519")
           with open(key_path, "wb") as f:
-               f.write(data)
+              f.write(data)
           os.chmod(key_path, 0o600)
+          print(f"Wrote {len(data)} bytes to {key_path}")
           EOF
           ssh-keygen -y -f "$HOME/.ssh/id_ed25519" > /dev/null
- 
+
       - name: Mount Local 110GB Drive for /out
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
         run: |
-          echo "=== Warming up Tailscale tunnel to ${{ secrets.REMOTE_HOST }} ==="
+          R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
+          R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
+
+          echo "=== Warming up Tailscale tunnel to $R_HOST ==="
           tailscale status
-          tailscale ping --until-direct=false --timeout=30s --c=3 "${{ secrets.REMOTE_HOST }}" || true
+          tailscale ping --until-direct=false --timeout=30s --c=3 "$R_HOST" || true
 
           echo "=== Verifying SSH Handshake ==="
           ssh -i "$HOME/.ssh/id_ed25519" \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
-          -o ConnectTimeout=30 \
-          "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" "echo SSH_HANDSHAKE_OK"
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=30 \
+            "${R_USER}@${R_HOST}" "echo SSH_HANDSHAKE_OK"
 
-          sshfs "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
+          sshfs "${R_USER}@${R_HOST}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
             "$PWD/workspace/out" \
             -o IdentityFile="$HOME/.ssh/id_ed25519" \
             -o StrictHostKeyChecking=no \
@@ -131,8 +147,15 @@ jobs:
       - name: Compile LineageOS
         run: |
           cd workspace
-          export TMPDIR="/mnt/tmp"
-          sudo mkdir -p "$TMPDIR" && sudo chown -R $USER:$USER "$TMPDIR"
+          MNT_AVAIL_GB=$(df -BG /mnt | awk 'NR==2 {gsub("G",""); print $4}')
+          if [ "${MNT_AVAIL_GB:-0}" -ge 8 ]; then
+            export TMPDIR="/mnt/tmp"
+          else
+            export TMPDIR="/tmp/lineage_tmp"
+          fi
+          sudo mkdir -p "$TMPDIR" && sudo chown -R "$USER:$USER" "$TMPDIR"
+          echo "Using TMPDIR=$TMPDIR (free space: $(df -h "$TMPDIR" | awk 'NR==2 {print $4}'))"
+
           export USE_CCACHE=0
           export WITH_DEXPREOPT=false
           export DONT_DEXPREOPT_PREBUILTS=true
@@ -141,13 +164,9 @@ jobs:
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
 
-          # Only remove .repo so all prebuilt Android.bp modules (including libwinpthread) remain intact
           rm -rf .repo
           mkdir -p .repo/repo
-          cat << 'EOF' > .repo/repo/repo
-          import sys
-          print('<?xml version="1.0" encoding="UTF-8"?>\n<manifest></manifest>')
-          EOF
+          printf '#!/usr/bin/env python3\nimport sys\nprint("<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>\\n<manifest></manifest>")\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
           echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="

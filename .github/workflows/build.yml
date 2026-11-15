@@ -60,35 +60,43 @@ jobs:
 
       - name: Mount Local 110GB Drive for /out
         run: |
-          mkdir -p ~/.ssh workspace/out
-          printf "%s\n" "${{ secrets.REMOTE_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
+         mkdir -p ~/.ssh workspace/out
+         printf "%s\n" "${{ secrets.REMOTE_SSH_KEY }}" | tr -d '\r' > ~/.ssh/id_ed25519
+         chmod 600 ~/.ssh/id_ed25519
 
-          echo "=== Warming up Tailscale tunnel to ${{ secrets.REMOTE_HOST }} ==="
-          tailscale status
-          tailscale ping --timeout=30s --c=3 "${{ secrets.REMOTE_HOST }}"
+         echo "=== Warming up Tailscale tunnel to ${{ secrets.REMOTE_HOST }} ==="
+         tailscale status
+         tailscale ping --until-direct=false --timeout=30s --c=3 "${{ secrets.REMOTE_HOST }}" || true
 
-          sshfs "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
-            "$PWD/workspace/out" \
-            -o IdentityFile="$HOME/.ssh/id_ed25519" \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o TCPKeepAlive=yes \
-            -o ServerAliveInterval=15 \
-            -o ServerAliveCountMax=6 \
-            -o ConnectTimeout=30 \
-            -o reconnect \
-            -o cache=yes \
-            -o kernel_cache \
-            -o auto_cache \
-            -o entry_timeout=120 \
-            -o attr_timeout=120 \
-            -o ac_attr_timeout=120 \
-            -o negative_timeout=120 \
-            -o compression=no
+         echo "=== Verifying SSH Handshake ==="
+         ssh -v -i "$HOME/.ssh/id_ed25519" \
+           -o StrictHostKeyChecking=no \
+           -o UserKnownHostsFile=/dev/null \
+           -o ConnectTimeout=30 \
+           "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}" "echo SSH_HANDSHAKE_OK"
 
-          echo "=== Mounted Remote /out Storage ==="
-          df -h "$PWD/workspace/out"
+         sshfs "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
+           "$PWD/workspace/out" \
+           -o IdentityFile="$HOME/.ssh/id_ed25519" \
+           -o StrictHostKeyChecking=no \
+           -o UserKnownHostsFile=/dev/null \
+           -o TCPKeepAlive=yes \
+           -o ServerAliveInterval=15 \
+           -o ServerAliveCountMax=6 \
+           -o ConnectTimeout=30 \
+           -o reconnect \
+           -o cache=yes \
+           -o kernel_cache \
+           -o auto_cache \
+           -o entry_timeout=120 \
+           -o attr_timeout=120 \
+           -o ac_attr_timeout=120 \
+           -o negative_timeout=120 \
+           -o compression=yes \
+           -o Ciphers=aes128-gcm@openssh.com
+
+         echo "=== Mounted Remote /out Storage ==="
+         df -h "$PWD/workspace/out"
 
       - name: Initialize LineageOS Workspace
         run: |

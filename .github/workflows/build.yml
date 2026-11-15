@@ -55,12 +55,12 @@ jobs:
 
       - name: Initialize LineageOS Workspace
         run: |
-          mkdir workspace
-          cd workspace
-          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1 --no-clone-bundle
-          
-          mkdir -p .repo/local_manifests
-          cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
+           mkdir workspace
+           cd workspace
+           ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1 --no-clone-bundle -g default,-darwin,-x86,-mips,-notdefault
+
+           mkdir -p .repo/local_manifests
+           cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
 
       - name: Sync Source Code
         run: |

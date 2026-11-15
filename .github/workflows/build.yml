@@ -33,43 +33,70 @@ jobs:
           sudo swapon /mnt/swapfile
           df -h / /mnt
 
-      - name: Install Build Dependencies
+      - name: Install Build Dependencies & SSHFS
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3
-          
+          sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 sshfs
+
           git config --global user.name "GitHub Action Builder"
           git config --global user.email "actions@github.com"
-          
+
           mkdir -p ~/bin
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
           chmod a+x ~/bin/repo
-          
+
       - name: Inject Legacy libncurses5 for Ubuntu 24.04
         run: |
           cd /tmp
           wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2_amd64.deb
           wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2_amd64.deb
           sudo dpkg -i libtinfo5_6.3-2_amd64.deb libncurses5_6.3-2_amd64.deb
-          df -h /
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ""
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          args: --accept-routes
+
+      - name: Mount Local 110GB Drive for /out
+        run: |
+          mkdir -p ~/.ssh workspace/out
+          echo "${{ secrets.REMOTE_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.REMOTE_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          sshfs "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
+            "$PWD/workspace/out" \
+            -o IdentityFile="$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=no \
+            -o reconnect \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=3 \
+            -o cache=yes \
+            -o kernel_cache \
+            -o auto_cache \
+            -o entry_timeout=120 \
+            -o attr_timeout=120 \
+            -o ac_attr_timeout=120 \
+            -o negative_timeout=120 \
+            -o compression=no
+
+          echo "=== Mounted Remote /out Storage ==="
+          df -h "$PWD/workspace/out"
 
       - name: Initialize LineageOS Workspace
         run: |
-           mkdir workspace
-           cd workspace
-           ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1 --no-clone-bundle -g default,-darwin,-x86,-mips,-notdefault
-
-           mkdir -p .repo/local_manifests
-           cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
+          cd workspace
+          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1 --no-clone-bundle
+          mkdir -p .repo/local_manifests
+          cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
 
       - name: Sync Source Code
         run: |
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
-          
-          echo "=== Available Space Before Compilation ==="
-          df -h /
-          
+
       - name: Compile LineageOS
         run: |
           cd workspace
@@ -77,17 +104,14 @@ jobs:
           sudo mkdir -p "$TMPDIR" && sudo chown -R $USER:$USER "$TMPDIR"
           export USE_CCACHE=0
           export WITH_DEXPREOPT=false
+          export DONT_DEXPREOPT_PREBUILTS=true
           export _JAVA_OPTIONS="-Xmx8g"
-          
+
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
-          
-          echo "=== Space BEFORE Nuke ==="
-          df -h /
-          
-          rm -rf .repo prebuilts/*/darwin-x86 prebuilts/*/*/darwin-x86 prebuilts/*/windows-x86 prebuilts/*/*/windows-x86
-          find prebuilts cts -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
-          
+
+          # Only remove .repo so all prebuilt Android.bp modules (including libwinpthread) remain intact
+          rm -rf .repo
           mkdir -p .repo/repo
           cat << 'EOF' > .repo/repo/repo
           import sys
@@ -95,37 +119,17 @@ jobs:
           EOF
           chmod +x .repo/repo/repo
 
+          echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
+          df -h / "$PWD/out"
 
-          # Case-insensitive match for clangDefaultVersion to delete unused Clang versions (~6.5GB)
-          ACTIVE_CLANG=$(grep -iP 'clangDefaultVersion\s*=\s*"\K[^"]+' build/soong/cc/config/global.go | head -n 1)
-          echo "Keeping active Clang: $ACTIVE_CLANG"
-          if [ -n "$ACTIVE_CLANG" ]; then
-            find prebuilts/clang/host/linux-x86 -maxdepth 1 -mindepth 1 -type d -name "clang-*" ! -name "$ACTIVE_CLANG" -exec rm -rf {} +
-          fi
- 
-          # Remove .repo, unused x86/MIPS/Windows toolchains, emulators, and large CTS videos (keep device/google* for Cuttlefish Android.bp modules)
-          rm -rf .repo \
-              prebuilts/qemu-kernel \
-              prebuilts/android-emulator \
-              prebuilts/gcc/linux-x86/x86 \
-              prebuilts/gcc/linux-x86/mips \
-              prebuilts/gcc/linux-x86/host/x86_64-w64-mingw32*
-          find cts -type f \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" \) -size +2M -delete 2>/dev/null || true
-          find prebuilts -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
-          sudo apt-get clean && sudo rm -rf /usr/share/doc/* /usr/share/man/* /var/lib/apt/lists/*
-
-          echo "=== Space AFTER Nuke ==="
-          df -h / /mnt
-          
-          # Log full output to build.log and print a 60s status + free-space heartbeat so GitHub never truncates errors
           mka bacon -j$(nproc --all) > build.log 2>&1 &
           BUILD_PID=$!
 
           while kill -0 $BUILD_PID 2>/dev/null; do
             sleep 60
             PROGRESS=$(grep -E '^\[ *[0-9]+%' build.log | tail -n 1)
-            DISK_FREE=$(df -h / | awk 'NR==2 {print $4}')
-            echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Root free: ${DISK_FREE}"
+            OUT_FREE=$(df -h "$PWD/out" | awk 'NR==2 {print $4}')
+            echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Remote /out free: ${OUT_FREE}"
           done
 
           if ! wait $BUILD_PID; then
@@ -133,10 +137,8 @@ jobs:
             tail -n 100 build.log
             exit 1
           fi
-          df -h /
-          
-      - name: Upload Flashable ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: LineageOS-8492A-Build
-          path: workspace/out/target/product/*/lineage-*.zip
+
+      - name: Unmount Remote Drive
+        if: always()
+        run: |
+          fusermount -u "$PWD/workspace/out" || true

@@ -23,19 +23,15 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      - name: Set up Swap Space (16GB)
+      - name: Set up Swap Space (12GB on /mnt)
         run: |
-          # Remove default swap from /mnt to free up the full 14GB secondary drive
           sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile || true
-          df -h /
-          
-          # Create an 16GB swap on the main root drive
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=12384
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          df -h /
+          sudo rm -f /mnt/swapfile /swapfile || true
+          sudo fallocate -l 12G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          df -h / /mnt
 
       - name: Install Build Dependencies
         run: |
@@ -77,9 +73,10 @@ jobs:
       - name: Compile LineageOS
         run: |
           cd workspace
-          export TMPDIR="$PWD/tmp"
-          mkdir -p "$TMPDIR"
+          export TMPDIR="/mnt/tmp"
+          sudo mkdir -p "$TMPDIR" && sudo chown -R $USER:$USER "$TMPDIR"
           export USE_CCACHE=0
+          export WITH_DEXPREOPT=false
           export _JAVA_OPTIONS="-Xmx8g"
           
           source build/envsetup.sh
@@ -88,7 +85,8 @@ jobs:
           echo "=== Space BEFORE Nuke ==="
           df -h /
           
-          rm -rf .repo
+          rm -rf .repo prebuilts/*/darwin-x86 prebuilts/*/*/darwin-x86 prebuilts/*/windows-x86 prebuilts/*/*/windows-x86
+          find prebuilts cts -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
           
           mkdir -p .repo/repo
           cat << 'EOF' > .repo/repo/repo
@@ -98,180 +96,24 @@ jobs:
           chmod +x .repo/repo/repo
           
           echo "=== Space AFTER Nuke ==="
-          df -h /
-
-          echo "=== Scanning & Purging Soong + PRODUCT_COPY_FILES Collisions ==="
-          mka nothing || true
-
-          python3 - << 'EOF'
-          import os
-          import re
-          from collections import defaultdict
-
-          mk_path = "out/soong/installs-lineage_8492A.mk"
-          bp_path = "vendor/tcl/Freyr_10_1_WiFi/Android.bp"
-
-          def normalize_install_path(path):
-              p = path.strip()
-              p = re.sub(r"^(?:out/target/product/[^/]+|\$\(PRODUCT_OUT\))/", "", p)
-              replacements = {
-                  "$(TARGET_COPY_OUT_VENDOR)": "vendor",
-                  "$(TARGET_COPY_OUT_SYSTEM)": "system",
-                  "$(TARGET_COPY_OUT_SYSTEM_EXT)": "system_ext",
-                  "$(TARGET_COPY_OUT_PRODUCT)": "product",
-                  "$(TARGET_COPY_OUT_ODM)": "odm",
-              }
-              for k, v in replacements.items():
-                  p = p.replace(k, v)
-              p = re.sub(r"^system/(vendor|product|system_ext|odm)/", r"\1/", p)
-              return p
-
-          def extract_soong_module(deps_str, vendor_only=False):
-              for token in deps_str.split():
-                  if not token.startswith("out/soong/.intermediates/"):
-                      continue
-                  is_vendor = token.startswith("out/soong/.intermediates/vendor/tcl/Freyr_10_1_WiFi/")
-                  if vendor_only != is_vendor:
-                      continue
-                  m = re.search(r"out/soong/\.intermediates/.+/([^/]+)/(?:android|linux)_[^/]+/", token)
-                  if m:
-                      return m.group(1)
-                  parts = token.split("/")
-                  if len(parts) >= 4:
-                      return parts[-3]
-              return None
-
-          soong_targets = set()
-
-          if os.path.exists(mk_path):
-              targets = defaultdict(list)
-              with open(mk_path, "r", encoding="utf-8", errors="ignore") as f:
-                  for lineno, line in enumerate(f, 1):
-                      if line.startswith(("out/target/product/", "$(PRODUCT_OUT)/")) and ":" in line:
-                          target, _, deps = line.partition(":")
-                          t_clean = target.strip()
-                          targets[t_clean].append((lineno, deps.strip()))
-                          soong_targets.add(normalize_install_path(t_clean))
-
-              dups = {t: entries for t, entries in targets.items() if len(entries) > 1}
-              print(f"Found {len(dups)} Soong-vs-Soong duplicate install target(s):")
-
-              modules_to_remove = set()
-              rename_map = {}
-
-              for target, entries in sorted(dups.items()):
-                  print(f"\nTARGET: {target}")
-                  vendor_mod = None
-                  lineage_mod = None
-                  for lineno, deps in entries:
-                      print(f"  Line {lineno}: {deps}")
-                      v = extract_soong_module(deps, vendor_only=True)
-                      l = extract_soong_module(deps, vendor_only=False)
-                      if v:
-                          vendor_mod = v
-                      if l:
-                          lineage_mod = l
-                  if vendor_mod:
-                      modules_to_remove.add(vendor_mod)
-                      if lineage_mod and lineage_mod != vendor_mod:
-                          rename_map[vendor_mod] = lineage_mod
-
-              if (modules_to_remove or rename_map) and os.path.exists(bp_path):
-                  with open(bp_path, "r", encoding="utf-8") as f:
-                      lines = f.readlines()
-
-                  out_lines, block, braces, removed = [], [], 0, 0
-                  for line in lines:
-                      block.append(line)
-                      braces += line.count("{") - line.count("}")
-                      if braces == 0 and any(l.strip() for l in block):
-                          block_text = "".join(block)
-                          if any(f'name: "{mod}"' in block_text for mod in modules_to_remove):
-                              removed += 1
-                          else:
-                              out_lines.extend(block)
-                          block = []
-                  out_lines.extend(block)
-
-                  bp_text = "".join(out_lines)
-                  for old_mod, new_mod in sorted(rename_map.items()):
-                      print(f'Renaming dependency: "{old_mod}" -> "{new_mod}"')
-                      bp_text = bp_text.replace(f'"{old_mod}"', f'"{new_mod}"')
-
-                  with open(bp_path, "w", encoding="utf-8") as f:
-                      f.write(bp_text)
-
-                  print(f"Removed {removed} colliding Android.bp block(s) and updated {len(rename_map)} dependency name(s).")
-
-          # Purge PRODUCT_COPY_FILES entries in device/tcl and vendor/tcl that collide with Soong
-          seen_copy_dests = set(soong_targets)
-          for search_dir in ("device/tcl", "vendor/tcl"):
-              if not os.path.exists(search_dir):
-                  continue
-              for root, _, files in os.walk(search_dir):
-                  for fname in files:
-                      if not fname.endswith(".mk"):
-                          continue
-                      fpath = os.path.join(root, fname)
-                      with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                          raw_lines = f.readlines()
-
-                      new_lines = []
-                      i = 0
-                      changed = False
-                      while i < len(raw_lines):
-                          line = raw_lines[i]
-                          m_hdr = re.match(r"^(\s*PRODUCT_COPY_FILES\s*(?:\+=|:=|=))(.*)$", line)
-                          if not m_hdr:
-                              new_lines.append(line)
-                              i += 1
-                              continue
-
-                          stmt_lines = [line]
-                          while stmt_lines[-1].rstrip("\r\n").endswith("\\") and i + 1 < len(raw_lines):
-                              i += 1
-                              stmt_lines.append(raw_lines[i])
-                          i += 1
-
-                          joined = ""
-                          for sl in stmt_lines:
-                              sl_nocomment = re.sub(r"#.*$", "", sl.rstrip("\r\n"))
-                              if sl_nocomment.endswith("\\"):
-                                  joined += sl_nocomment[:-1] + " "
-                              else:
-                                  joined += sl_nocomment + " "
-
-                          m_full = re.match(r"^(\s*PRODUCT_COPY_FILES\s*(?:\+=|:=|=))(.*)$", joined)
-                          header = m_full.group(1)
-                          tokens = m_full.group(2).split()
-
-                          kept = []
-                          for tok in tokens:
-                              if ":" not in tok:
-                                  kept.append(tok)
-                                  continue
-                              _, _, dst = tok.partition(":")
-                              norm_dst = normalize_install_path(dst)
-                              if norm_dst in seen_copy_dests:
-                                  print(f"Removed duplicate PRODUCT_COPY_FILES in {fpath}: {tok}")
-                                  changed = True
-                              else:
-                                  seen_copy_dests.add(norm_dst)
-                                  kept.append(tok)
-
-                          if kept:
-                              new_lines.append(f"{header} \\\n")
-                              for idx, tok in enumerate(kept):
-                                  suffix = " \\\n" if idx < len(kept) - 1 else "\n"
-                                  new_lines.append(f"    {tok}{suffix}")
-
-                      if changed:
-                          with open(fpath, "w", encoding="utf-8") as f:
-                              f.writelines(new_lines)
-          EOF
+          df -h / /mnt
           
-          # Proceed with the build using all cores
-          mka bacon -j$(nproc --all)
+          # Log full output to build.log and print a 60s status + free-space heartbeat so GitHub never truncates errors
+          mka bacon -j$(nproc --all) > build.log 2>&1 &
+          BUILD_PID=$!
+
+          while kill -0 $BUILD_PID 2>/dev/null; do
+            sleep 60
+            PROGRESS=$(grep -E '^\[ *[0-9]+%' build.log | tail -n 1)
+            DISK_FREE=$(df -h / | awk 'NR==2 {print $4}')
+            echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Root free: ${DISK_FREE}"
+          done
+
+          if ! wait $BUILD_PID; then
+            echo "=== BUILD FAILED — LAST 100 LINES OF build.log ==="
+            tail -n 100 build.log
+            exit 1
+          fi
           df -h /
           
       - name: Upload Flashable ZIP

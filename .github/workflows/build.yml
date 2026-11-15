@@ -55,24 +55,29 @@ jobs:
       - name: Connect to Tailscale
         uses: tailscale/github-action@v2
         with:
-          oauth-client-id: ""
           authkey: ${{ secrets.TS_AUTHKEY }}
           args: --accept-routes
 
       - name: Mount Local 110GB Drive for /out
         run: |
           mkdir -p ~/.ssh workspace/out
-          echo "${{ secrets.REMOTE_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf "%s\n" "${{ secrets.REMOTE_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "${{ secrets.REMOTE_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          echo "=== Warming up Tailscale tunnel to ${{ secrets.REMOTE_HOST }} ==="
+          tailscale status
+          tailscale ping --timeout=30s --c=3 "${{ secrets.REMOTE_HOST }}"
 
           sshfs "${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
             "$PWD/workspace/out" \
             -o IdentityFile="$HOME/.ssh/id_ed25519" \
             -o StrictHostKeyChecking=no \
-            -o reconnect \
+            -o UserKnownHostsFile=/dev/null \
+            -o TCPKeepAlive=yes \
             -o ServerAliveInterval=15 \
-            -o ServerAliveCountMax=3 \
+            -o ServerAliveCountMax=6 \
+            -o ConnectTimeout=30 \
+            -o reconnect \
             -o cache=yes \
             -o kernel_cache \
             -o auto_cache \

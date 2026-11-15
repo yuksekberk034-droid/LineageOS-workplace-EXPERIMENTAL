@@ -64,7 +64,7 @@ jobs:
         env:
           REMOTE_SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
         run: |
-          mkdir -p ~/.ssh workspace/out
+          mkdir -p ~/.ssh workspace
           python3 - << 'EOF'
           import base64, os, re
 
@@ -90,13 +90,16 @@ jobs:
           EOF
           ssh-keygen -y -f "$HOME/.ssh/id_ed25519" > /dev/null
 
-      - name: Mount Local 110GB Drive for /out
+      - name: Mount Local 110GB Drive for Heavy Artifacts
         env:
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
         run: |
           R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
           R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
+
+          sudo mkdir -p /mnt/remote_out
+          sudo chown -R "$USER:$USER" /mnt/remote_out
 
           echo "=== Warming up Tailscale tunnel to $R_HOST ==="
           tailscale status
@@ -110,7 +113,7 @@ jobs:
             "${R_USER}@${R_HOST}" "echo SSH_HANDSHAKE_OK"
 
           sshfs "${R_USER}@${R_HOST}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
-            "$PWD/workspace/out" \
+            /mnt/remote_out \
             -o IdentityFile="$HOME/.ssh/id_ed25519" \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
@@ -129,8 +132,8 @@ jobs:
             -o compression=yes \
             -o Ciphers=aes128-gcm@openssh.com
 
-          echo "=== Mounted Remote /out Storage ==="
-          df -h "$PWD/workspace/out"
+          echo "=== Mounted Remote Storage ==="
+          df -h /mnt/remote_out
 
       - name: Initialize LineageOS Workspace
         run: |
@@ -161,6 +164,7 @@ jobs:
           export DONT_DEXPREOPT_PREBUILTS=true
           export _JAVA_OPTIONS="-Xmx8g"
 
+          echo "=== Running envsetup and lunch on local NVMe ==="
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
 
@@ -169,8 +173,27 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nprint("<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>\\n<manifest></manifest>")\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
+          echo "=== Generating Ninja build graph on local NVMe ==="
+          mka nothing -j$(nproc --all)
+
+          # Now offload heavy .intermediates & product directories (~50GB+) onto the 110GB external drive
+          mkdir -p /mnt/remote_out/intermediates /mnt/remote_out/product
+          mkdir -p out/soong out/target
+
+          if [ -d out/soong/.intermediates ] && [ ! -L out/soong/.intermediates ]; then
+            cp -a out/soong/.intermediates/. /mnt/remote_out/intermediates/ 2>/dev/null || true
+            rm -rf out/soong/.intermediates
+          fi
+          ln -sfn /mnt/remote_out/intermediates out/soong/.intermediates
+
+          if [ -d out/target/product ] && [ ! -L out/target/product ]; then
+            cp -a out/target/product/. /mnt/remote_out/product/ 2>/dev/null || true
+            rm -rf out/target/product
+          fi
+          ln -sfn /mnt/remote_out/product out/target/product
+
           echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
-          df -h / "$PWD/out"
+          df -h / /mnt/remote_out
 
           mka bacon -j$(nproc --all) > build.log 2>&1 &
           BUILD_PID=$!
@@ -178,8 +201,9 @@ jobs:
           while kill -0 $BUILD_PID 2>/dev/null; do
             sleep 60
             PROGRESS=$(grep -E '^\[ *[0-9]+%' build.log | tail -n 1)
-            OUT_FREE=$(df -h "$PWD/out" | awk 'NR==2 {print $4}')
-            echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Remote /out free: ${OUT_FREE}"
+            ROOT_FREE=$(df -h / | awk 'NR==2 {print $4}')
+            OUT_FREE=$(df -h /mnt/remote_out | awk 'NR==2 {print $4}')
+            echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Root free: ${ROOT_FREE} | Remote /out free: ${OUT_FREE}"
           done
 
           if ! wait $BUILD_PID; then
@@ -191,4 +215,4 @@ jobs:
       - name: Unmount Remote Drive
         if: always()
         run: |
-          fusermount -u "$PWD/workspace/out" || true
+          fusermount -u /mnt/remote_out || true

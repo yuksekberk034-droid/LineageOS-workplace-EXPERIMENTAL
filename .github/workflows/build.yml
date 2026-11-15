@@ -95,24 +95,22 @@ jobs:
           EOF
           chmod +x .repo/repo/repo
 
+
           # Detect the exact Clang version LineageOS 20 uses and delete all older Clang versions (~7GB)
           ACTIVE_CLANG=$(grep -oP 'ClangDefaultVersion\s*=\s*"\K[^"]+' build/soong/cc/config/global.go)
           echo "Keeping active Clang: $ACTIVE_CLANG"
           find prebuilts/clang/host/linux-x86 -maxdepth 1 -mindepth 1 -type d -name "clang-*" ! -name "$ACTIVE_CLANG" -exec rm -rf {} +
 
-          # Remove .repo, Pixel kernels/devices, emulators, x86 webviews, and leftover git metadata
+          # Remove .repo, Pixel devices/kernels, emulators, and large CTS media files (keep all Android.bp files)
           rm -rf .repo \
               device/google* \
               prebuilts/qemu-kernel \
-              prebuilts/android-emulator \
-              external/chromium-webview/prebuilt/x86* \
-              cts \
-              test/vts* \
-              test/mts*
+              prebuilts/android-emulator
+          find cts -type f \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" \) -size +2M -delete 2>/dev/null || true
           find prebuilts -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
-          
-          echo "=== Space AFTER Nuke ==="
-          df -h / /mnt
+
+           echo "=== Space AFTER Nuke ==="
+           df -h / /mnt
           
           # Log full output to build.log and print a 60s status + free-space heartbeat so GitHub never truncates errors
           mka bacon -j$(nproc --all) > build.log 2>&1 &

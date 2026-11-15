@@ -96,21 +96,26 @@ jobs:
           chmod +x .repo/repo/repo
 
 
-          # Detect the exact Clang version LineageOS 20 uses and delete all older Clang versions (~7GB)
-          ACTIVE_CLANG=$(grep -oP 'ClangDefaultVersion\s*=\s*"\K[^"]+' build/soong/cc/config/global.go)
+          # Case-insensitive match for clangDefaultVersion to delete unused Clang versions (~6.5GB)
+          ACTIVE_CLANG=$(grep -iP 'clangDefaultVersion\s*=\s*"\K[^"]+' build/soong/cc/config/global.go | head -n 1)
           echo "Keeping active Clang: $ACTIVE_CLANG"
-          find prebuilts/clang/host/linux-x86 -maxdepth 1 -mindepth 1 -type d -name "clang-*" ! -name "$ACTIVE_CLANG" -exec rm -rf {} +
-
-          # Remove .repo, Pixel devices/kernels, emulators, and large CTS media files (keep all Android.bp files)
+          if [ -n "$ACTIVE_CLANG" ]; then
+            find prebuilts/clang/host/linux-x86 -maxdepth 1 -mindepth 1 -type d -name "clang-*" ! -name "$ACTIVE_CLANG" -exec rm -rf {} +
+          fi
+ 
+          # Remove .repo, unused x86/MIPS/Windows toolchains, emulators, and large CTS videos (keep device/google* for Cuttlefish Android.bp modules)
           rm -rf .repo \
-              device/google* \
               prebuilts/qemu-kernel \
-              prebuilts/android-emulator
+              prebuilts/android-emulator \
+              prebuilts/gcc/linux-x86/x86 \
+              prebuilts/gcc/linux-x86/mips \
+              prebuilts/gcc/linux-x86/host/x86_64-w64-mingw32*
           find cts -type f \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" \) -size +2M -delete 2>/dev/null || true
           find prebuilts -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
+          sudo apt-get clean && sudo rm -rf /usr/share/doc/* /usr/share/man/* /var/lib/apt/lists/*
 
-           echo "=== Space AFTER Nuke ==="
-           df -h / /mnt
+          echo "=== Space AFTER Nuke ==="
+          df -h / /mnt
           
           # Log full output to build.log and print a 60s status + free-space heartbeat so GitHub never truncates errors
           mka bacon -j$(nproc --all) > build.log 2>&1 &

@@ -94,6 +94,22 @@ jobs:
           print('<?xml version="1.0" encoding="UTF-8"?>\n<manifest></manifest>')
           EOF
           chmod +x .repo/repo/repo
+
+          # Detect the exact Clang version LineageOS 20 uses and delete all older Clang versions (~7GB)
+          ACTIVE_CLANG=$(grep -oP 'ClangDefaultVersion\s*=\s*"\K[^"]+' build/soong/cc/config/global.go)
+          echo "Keeping active Clang: $ACTIVE_CLANG"
+          find prebuilts/clang/host/linux-x86 -maxdepth 1 -mindepth 1 -type d -name "clang-*" ! -name "$ACTIVE_CLANG" -exec rm -rf {} +
+
+          # Remove .repo, Pixel kernels/devices, emulators, x86 webviews, and leftover git metadata
+          rm -rf .repo \
+              device/google* \
+              prebuilts/qemu-kernel \
+              prebuilts/android-emulator \
+              external/chromium-webview/prebuilt/x86* \
+              cts \
+              test/vts* \
+              test/mts*
+          find prebuilts -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
           
           echo "=== Space AFTER Nuke ==="
           df -h / /mnt

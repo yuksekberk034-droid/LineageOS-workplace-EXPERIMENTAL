@@ -171,10 +171,13 @@ jobs:
           echo "=== Generating Ninja build graph on local NVMe ==="
           mka nothing -j$(nproc --all)
 
-          # Now offload heavy .intermediates & product directories (~50GB+) onto the 110GB external drive
-          mkdir -p /mnt/remote_out/intermediates /mnt/remote_out/product
-          mkdir -p out/soong out/target
+          # Restore saved Ninja logs from external drive if resuming a previous run
+          mkdir -p /mnt/remote_out/intermediates /mnt/remote_out/product /mnt/remote_out/ninja_state
+          cp -f /mnt/remote_out/ninja_state/.ninja_log out/.ninja_log 2>/dev/null || true
+          cp -f /mnt/remote_out/ninja_state/.ninja_deps out/.ninja_deps 2>/dev/null || true
 
+          # Offload heavy .intermediates & product directories onto the 110GB external drive
+          mkdir -p out/soong out/target
           if [ -d out/soong/.intermediates ] && [ ! -L out/soong/.intermediates ]; then
             cp -a out/soong/.intermediates/. /mnt/remote_out/intermediates/ 2>/dev/null || true
             rm -rf out/soong/.intermediates
@@ -190,22 +193,26 @@ jobs:
           echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
           df -h / /mnt/remote_out
 
-          mka bacon -j$(nproc --all) > build.log 2>&1 &
+          mka bacon -j10 > build.log 2>&1 &
           BUILD_PID=$!
 
           while kill -0 $BUILD_PID 2>/dev/null; do
             sleep 60
+            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
             PROGRESS=$(grep -E '^\[ *[0-9]+%' build.log | tail -n 1)
             ROOT_FREE=$(df -h / | awk 'NR==2 {print $4}')
             OUT_FREE=$(df -h /mnt/remote_out | awk 'NR==2 {print $4}')
             echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Root free: ${ROOT_FREE} | Remote /out free: ${OUT_FREE}"
           done
 
+          cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
+
           if ! wait $BUILD_PID; then
             echo "=== BUILD FAILED — LAST 100 LINES OF build.log ==="
             tail -n 100 build.log
             exit 1
           fi
+          
 
       - name: Unmount Remote Drive
         if: always()

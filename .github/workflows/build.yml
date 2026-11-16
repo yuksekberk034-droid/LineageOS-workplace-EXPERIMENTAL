@@ -110,12 +110,12 @@ jobs:
             -o IdentityFile="$HOME/.ssh/id_ed25519" \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
+            -o max_conns=6 \
             -o TCPKeepAlive=yes \
             -o ServerAliveInterval=15 \
             -o ServerAliveCountMax=6 \
             -o ConnectTimeout=30 \
             -o reconnect \
-            -o writeback_cache \
             -o cache=yes \
             -o kernel_cache \
             -o auto_cache \
@@ -129,7 +129,6 @@ jobs:
           echo "=== Mounted Remote Storage ==="
           df -h /mnt/remote_out
           
-
       - name: Initialize LineageOS Workspace
         run: |
           cd workspace

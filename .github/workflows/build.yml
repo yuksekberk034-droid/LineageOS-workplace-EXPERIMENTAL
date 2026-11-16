@@ -204,15 +204,15 @@ jobs:
                   linked += 1
           print(f"Linked {linked} cached artifacts from external drive")
           EOF
-
+          
           offload_completed_artifacts() {
             python3 - << 'EOF'
-          import os, shutil, time
+          import os, subprocess, time
 
           now = time.time()
-          remote_base = "/mnt/remote_out/offload"
           scan_roots = ["out/soong/.intermediates", "out/target"]
-          moved_bytes, moved_files = 0, 0
+          candidates = []
+          total_bytes = 0
 
           for base in scan_roots:
               if not os.path.exists(base):
@@ -227,29 +227,63 @@ jobs:
                           # Only offload files > 128KB untouched for at least 45 seconds
                           if st.st_size < 131072 or (now - st.st_mtime) < 45:
                               continue
-
-                          dst = os.path.join(remote_base, src)
-                          dst_tmp = dst + ".tmp"
-                          os.makedirs(os.path.dirname(dst), exist_ok=True)
-                          shutil.copyfile(src, dst_tmp)
-                          os.utime(dst_tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
-                          os.replace(dst_tmp, dst)
-
-                          tmp_link = src + ".symlink_tmp"
-                          if os.path.lexists(tmp_link):
-                              os.unlink(tmp_link)
-                          os.symlink(dst, tmp_link)
-                          os.replace(tmp_link, src)
-
-                          moved_bytes += st.st_size
-                          moved_files += 1
+                          candidates.append((src, st.st_size))
+                          total_bytes += st.st_size
                       except OSError:
                           pass
 
-          print(f"=== Offloaded {moved_files} completed files ({moved_bytes / (1024**3):.2f} GB) to local 110GB drive ===")
+          if not candidates:
+              print("=== No new completed files >= 128KB to offload ===")
+              raise SystemExit(0)
+
+          list_path = "/tmp/offload_list.txt"
+          with open(list_path, "w") as f:
+              for src, _ in candidates:
+                  f.write(src + "\n")
+
+          r_user = os.environ["R_USER"]
+          r_host = os.environ["R_HOST"]
+          remote_dir = "/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out/offload"
+
+          # Stream all candidates in a single continuous SSH tar pipe at full line speed
+          tar_cmd = ["tar", "-cf", "-", "-T", list_path]
+          ssh_cmd = [
+              "ssh", "-i", os.path.expanduser("~/.ssh/id_ed25519"),
+              "-o", "StrictHostKeyChecking=no",
+              "-o", "UserKnownHostsFile=/dev/null",
+              "-o", "Compression=yes",
+              "-c", "aes128-gcm@openssh.com",
+              f"{r_user}@{r_host}",
+              f"mkdir -p '{remote_dir}' && tar -xf - -C '{remote_dir}'"
+          ]
+
+          p1 = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE)
+          p2 = subprocess.Popen(ssh_cmd, stdin=p1.stdout)
+          p1.stdout.close()
+          if p2.wait() != 0 or p1.wait() != 0:
+              print("=== Bulk tar offload encountered an error; will retry next cycle ===")
+              raise SystemExit(0)
+
+          # Replace streamed files with symlinks to /mnt/remote_out/offload
+          replaced = 0
+          for src, _ in candidates:
+              dst = os.path.join("/mnt/remote_out/offload", src)
+              try:
+                  if os.path.exists(dst) and not os.path.islink(src):
+                      tmp_link = src + ".symlink_tmp"
+                      if os.path.lexists(tmp_link):
+                          os.unlink(tmp_link)
+                      os.symlink(dst, tmp_link)
+                      os.replace(tmp_link, src)
+                      replaced += 1
+              except OSError:
+                  pass
+
+          print(f"=== Bulk-offloaded {replaced} files ({total_bytes / (1024**3):.2f} GB) at full line speed ===")
           EOF
             cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
           }
+          
 
           echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
           df -h / /mnt/remote_out

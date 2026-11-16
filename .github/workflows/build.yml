@@ -142,8 +142,14 @@ jobs:
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
 
       - name: Compile LineageOS
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
         run: |
           cd workspace
+          R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
+          R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
+
           MNT_AVAIL_GB=$(df -BG /mnt | awk 'NR==2 {gsub("G",""); print $4}')
           if [ "${MNT_AVAIL_GB:-0}" -ge 8 ]; then
             export TMPDIR="/mnt/tmp"
@@ -171,36 +177,33 @@ jobs:
           echo "=== Generating Ninja build graph on local NVMe ==="
           mka nothing -j$(nproc --all)
 
-          # Restore any prior Ninja state & cached artifacts from your 110GB external drive
-          mkdir -p /mnt/remote_out/offload /mnt/remote_out/ninja_state /mnt/remote_out/FINAL_ROM
+          # Restore Ninja build logs and link all cached artifacts in seconds via SSH
+          mkdir -p /mnt/remote_out/offload/out /mnt/remote_out/ninja_state /mnt/remote_out/FINAL_ROM
           cp -f /mnt/remote_out/ninja_state/.ninja_log out/.ninja_log 2>/dev/null || true
           cp -f /mnt/remote_out/ninja_state/.ninja_deps out/.ninja_deps 2>/dev/null || true
 
-          if [ -d /mnt/remote_out/intermediates ]; then
-            echo "=== Restoring previous run's cached intermediates to local NVMe ==="
-            mkdir -p out/soong/.intermediates
-            rsync -a /mnt/remote_out/intermediates/ out/soong/.intermediates/ || true
-          fi
+          echo "=== Linking previously offloaded artifacts from 110GB drive ==="
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=30 \
+            "${R_USER}@${R_HOST}" \
+            "cd /run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out/offload && find out -type f ! -name '*.tmp'" \
+            | python3 - << 'EOF'
+          import os, sys
 
-          if [ -d /mnt/remote_out/offload/out ]; then
-            echo "=== Linking previously offloaded artifacts from 110GB drive ==="
-            python3 - << 'EOF'
-          import os
-          remote_root = "/mnt/remote_out/offload/out"
           linked = 0
-          for root, _, files in os.walk(remote_root):
-              for fname in files:
-                  if fname.endswith(".tmp"):
-                      continue
-                  remote_file = os.path.join(root, fname)
-                  rel_path = os.path.relpath(remote_file, "/mnt/remote_out/offload")
-                  if not os.path.lexists(rel_path):
-                      os.makedirs(os.path.dirname(rel_path), exist_ok=True)
-                      os.symlink(remote_file, rel_path)
-                      linked += 1
+          for line in sys.stdin:
+              rel_path = line.strip()
+              if not rel_path:
+                  continue
+              remote_file = os.path.join("/mnt/remote_out/offload", rel_path)
+              if not os.path.lexists(rel_path):
+                  os.makedirs(os.path.dirname(rel_path), exist_ok=True)
+                  os.symlink(remote_file, rel_path)
+                  linked += 1
           print(f"Linked {linked} cached artifacts from external drive")
           EOF
-          fi
 
           offload_completed_artifacts() {
             python3 - << 'EOF'
@@ -290,6 +293,7 @@ jobs:
           cp -f out/target/product/Freyr_10_1_WiFi/lineage-*.zip /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
           cp -f out/target/product/Freyr_10_1_WiFi/*.img /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
           ls -lh /mnt/remote_out/FINAL_ROM/
+          
           
 
       - name: Unmount Remote Drive

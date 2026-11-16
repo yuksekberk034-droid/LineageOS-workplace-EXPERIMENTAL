@@ -156,13 +156,20 @@ jobs:
           export USE_CCACHE=0
           export WITH_DEXPREOPT=false
           export DONT_DEXPREOPT_PREBUILTS=true
-          export _JAVA_OPTIONS="-Xmx8g"
+          export _JAVA_OPTIONS="-Xmx6g"
 
           echo "=== Running envsetup and lunch on local NVMe ==="
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
 
-          rm -rf .repo
+          # Safely free ~12GB on local NVMe without touching any Android.bp files
+          ACTIVE_CLANG=$(grep -iP 'clangDefaultVersion\s*=\s*"\K[^"]+' build/soong/cc/config/global.go | head -n 1)
+          if [ -n "$ACTIVE_CLANG" ]; then
+            find prebuilts/clang/host/linux-x86 -maxdepth 1 -mindepth 1 -type d -name "clang-*" ! -name "$ACTIVE_CLANG" -exec rm -rf {} +
+          fi
+          rm -rf .repo prebuilts/qemu-kernel prebuilts/android-emulator
+          find cts -type f \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" -o -name "*.wav" -o -name "*.flac" \) -size +1M -delete 2>/dev/null || true
+
           mkdir -p .repo/repo
           printf '#!/usr/bin/env python3\nimport sys\nprint("<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>\\n<manifest></manifest>")\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
@@ -170,47 +177,104 @@ jobs:
           echo "=== Generating Ninja build graph on local NVMe ==="
           mka nothing -j$(nproc --all)
 
-          # Restore saved Ninja logs from external drive if resuming a previous run
-          mkdir -p /mnt/remote_out/intermediates /mnt/remote_out/product /mnt/remote_out/ninja_state
+          # Restore any prior Ninja state & ~11% intermediates onto local NVMe so we don't start from 0%
+          mkdir -p /mnt/remote_out/offload /mnt/remote_out/ninja_state /mnt/remote_out/FINAL_ROM
           cp -f /mnt/remote_out/ninja_state/.ninja_log out/.ninja_log 2>/dev/null || true
           cp -f /mnt/remote_out/ninja_state/.ninja_deps out/.ninja_deps 2>/dev/null || true
-
-          # Offload heavy .intermediates & product directories onto the 110GB external drive
-          mkdir -p out/soong out/target
-          if [ -d out/soong/.intermediates ] && [ ! -L out/soong/.intermediates ]; then
-            cp -a out/soong/.intermediates/. /mnt/remote_out/intermediates/ 2>/dev/null || true
-            rm -rf out/soong/.intermediates
+          if [ -d /mnt/remote_out/intermediates ]; then
+            echo "=== Restoring previous run's cached intermediates to local NVMe ==="
+            mkdir -p out/soong/.intermediates
+            rsync -a /mnt/remote_out/intermediates/ out/soong/.intermediates/ || true
           fi
-          ln -sfn /mnt/remote_out/intermediates out/soong/.intermediates
 
-          if [ -d out/target/product ] && [ ! -L out/target/product ]; then
-            cp -a out/target/product/. /mnt/remote_out/product/ 2>/dev/null || true
-            rm -rf out/target/product
-          fi
-          ln -sfn /mnt/remote_out/product out/target/product
+          offload_completed_artifacts() {
+            python3 - << 'EOF'
+          import os, shutil, time
+
+          now = time.time()
+          remote_base = "/mnt/remote_out/offload"
+          scan_roots = ["out/soong/.intermediates", "out/target"]
+          moved_bytes, moved_files = 0, 0
+
+          for base in scan_roots:
+              if not os.path.exists(base):
+                  continue
+              for root, _, files in os.walk(base):
+                  for fname in files:
+                      src = os.path.join(root, fname)
+                      try:
+                          if os.path.islink(src):
+                              continue
+                          st = os.stat(src)
+                          # Only offload files > 128KB that haven't been modified in the last 45s
+                          if st.st_size < 131072 or (now - st.st_mtime) < 45:
+                              continue
+
+                          dst = os.path.join(remote_base, src)
+                          os.makedirs(os.path.dirname(dst), exist_ok=True)
+                          try:
+                              shutil.copy2(src, dst)
+                          except Exception:
+                              shutil.copyfile(src, dst)
+
+                          tmp_link = src + ".symlink_tmp"
+                          if os.path.lexists(tmp_link):
+                              os.unlink(tmp_link)
+                          os.symlink(dst, tmp_link)
+                          os.replace(tmp_link, src)
+
+                          moved_bytes += st.st_size
+                          moved_files += 1
+                      except OSError:
+                          pass
+
+          print(f"=== Offloaded {moved_files} completed files ({moved_bytes / (1024**3):.2f} GB) to local 110GB drive ===")
+          EOF
+            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
+          }
 
           echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
           df -h / /mnt/remote_out
 
-          mka bacon -j10 > build.log 2>&1 &
+          mka bacon -j6 > build.log 2>&1 &
           BUILD_PID=$!
+          LAST_BUCKET=0
 
           while kill -0 $BUILD_PID 2>/dev/null; do
             sleep 60
-            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
             PROGRESS=$(grep -E '^\[ *[0-9]+%' build.log | tail -n 1)
+            PCT=$(echo "$PROGRESS" | sed -n 's/^\[ *\([0-9]\+\)%.*/\1/p')
+            PCT=${PCT:-0}
+            BUCKET=$((PCT / 10))
+            ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
+
+            # Trigger offload at every 10% milestone (10%, 20%, ...) OR if local NVMe drops below 10GB
+            if [ "$BUCKET" -gt "$LAST_BUCKET" ] || [ "${ROOT_FREE_GB:-0}" -lt 10 ]; then
+              echo "[$(date -u +%H:%M:%S)] Milestone ${PCT}% reached (Root free: ${ROOT_FREE_GB}G) — offloading completed artifacts..."
+              offload_completed_artifacts
+              LAST_BUCKET=$BUCKET
+            fi
+
             ROOT_FREE=$(df -h / | awk 'NR==2 {print $4}')
             OUT_FREE=$(df -h /mnt/remote_out | awk 'NR==2 {print $4}')
             echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Root free: ${ROOT_FREE} | Remote /out free: ${OUT_FREE}"
           done
 
-          cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
+          wait $BUILD_PID
+          BUILD_STATUS=$?
 
-          if ! wait $BUILD_PID; then
+          offload_completed_artifacts
+
+          if [ $BUILD_STATUS -ne 0 ]; then
             echo "=== BUILD FAILED — LAST 100 LINES OF build.log ==="
             tail -n 100 build.log
             exit 1
           fi
+
+          echo "=== Copying Final Flashable ROM to Local Drive ==="
+          cp -f out/target/product/Freyr_10_1_WiFi/lineage-*.zip /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
+          cp -f out/target/product/Freyr_10_1_WiFi/*.img /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
+          ls -lh /mnt/remote_out/FINAL_ROM/
           
 
       - name: Unmount Remote Drive

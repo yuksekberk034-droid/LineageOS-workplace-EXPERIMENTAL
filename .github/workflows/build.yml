@@ -105,13 +105,6 @@ jobs:
           tailscale status
           tailscale ping --until-direct=false --timeout=30s --c=3 "$R_HOST" || true
 
-          echo "=== Verifying SSH Handshake ==="
-          ssh -i "$HOME/.ssh/id_ed25519" \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=30 \
-            "${R_USER}@${R_HOST}" "echo SSH_HANDSHAKE_OK"
-
           sshfs "${R_USER}@${R_HOST}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
             /mnt/remote_out \
             -o IdentityFile="$HOME/.ssh/id_ed25519" \
@@ -122,18 +115,20 @@ jobs:
             -o ServerAliveCountMax=6 \
             -o ConnectTimeout=30 \
             -o reconnect \
+            -o writeback_cache \
             -o cache=yes \
             -o kernel_cache \
             -o auto_cache \
-            -o entry_timeout=120 \
-            -o attr_timeout=120 \
-            -o ac_attr_timeout=120 \
-            -o negative_timeout=120 \
+            -o entry_timeout=300 \
+            -o attr_timeout=300 \
+            -o ac_attr_timeout=300 \
+            -o negative_timeout=300 \
             -o compression=yes \
             -o Ciphers=aes128-gcm@openssh.com
 
           echo "=== Mounted Remote Storage ==="
           df -h /mnt/remote_out
+          
 
       - name: Initialize LineageOS Workspace
         run: |

@@ -162,14 +162,8 @@ jobs:
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
 
-          # Safely free ~12GB on local NVMe without touching any Android.bp files
-          ACTIVE_CLANG=$(grep -iP 'clangDefaultVersion\s*=\s*"\K[^"]+' build/soong/cc/config/global.go | head -n 1)
-          if [ -n "$ACTIVE_CLANG" ]; then
-            find prebuilts/clang/host/linux-x86 -maxdepth 1 -mindepth 1 -type d -name "clang-*" ! -name "$ACTIVE_CLANG" -exec rm -rf {} +
-          fi
-          rm -rf .repo prebuilts/qemu-kernel prebuilts/android-emulator
-          find cts -type f \( -name "*.mp4" -o -name "*.mkv" -o -name "*.webm" -o -name "*.wav" -o -name "*.flac" \) -size +1M -delete 2>/dev/null || true
-
+          # Only remove .repo so every prebuilt and CTS Android.bp source path stays intact
+          rm -rf .repo
           mkdir -p .repo/repo
           printf '#!/usr/bin/env python3\nimport sys\nprint("<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>\\n<manifest></manifest>")\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
@@ -177,14 +171,35 @@ jobs:
           echo "=== Generating Ninja build graph on local NVMe ==="
           mka nothing -j$(nproc --all)
 
-          # Restore any prior Ninja state & ~11% intermediates onto local NVMe so we don't start from 0%
+          # Restore any prior Ninja state & cached artifacts from your 110GB external drive
           mkdir -p /mnt/remote_out/offload /mnt/remote_out/ninja_state /mnt/remote_out/FINAL_ROM
           cp -f /mnt/remote_out/ninja_state/.ninja_log out/.ninja_log 2>/dev/null || true
           cp -f /mnt/remote_out/ninja_state/.ninja_deps out/.ninja_deps 2>/dev/null || true
+
           if [ -d /mnt/remote_out/intermediates ]; then
             echo "=== Restoring previous run's cached intermediates to local NVMe ==="
             mkdir -p out/soong/.intermediates
             rsync -a /mnt/remote_out/intermediates/ out/soong/.intermediates/ || true
+          fi
+
+          if [ -d /mnt/remote_out/offload/out ]; then
+            echo "=== Linking previously offloaded artifacts from 110GB drive ==="
+            python3 - << 'EOF'
+          import os
+          remote_root = "/mnt/remote_out/offload/out"
+          linked = 0
+          for root, _, files in os.walk(remote_root):
+              for fname in files:
+                  if fname.endswith(".tmp"):
+                      continue
+                  remote_file = os.path.join(root, fname)
+                  rel_path = os.path.relpath(remote_file, "/mnt/remote_out/offload")
+                  if not os.path.lexists(rel_path):
+                      os.makedirs(os.path.dirname(rel_path), exist_ok=True)
+                      os.symlink(remote_file, rel_path)
+                      linked += 1
+          print(f"Linked {linked} cached artifacts from external drive")
+          EOF
           fi
 
           offload_completed_artifacts() {
@@ -206,16 +221,16 @@ jobs:
                           if os.path.islink(src):
                               continue
                           st = os.stat(src)
-                          # Only offload files > 128KB that haven't been modified in the last 45s
+                          # Only offload files > 128KB untouched for at least 45 seconds
                           if st.st_size < 131072 or (now - st.st_mtime) < 45:
                               continue
 
                           dst = os.path.join(remote_base, src)
+                          dst_tmp = dst + ".tmp"
                           os.makedirs(os.path.dirname(dst), exist_ok=True)
-                          try:
-                              shutil.copy2(src, dst)
-                          except Exception:
-                              shutil.copyfile(src, dst)
+                          shutil.copyfile(src, dst_tmp)
+                          os.utime(dst_tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+                          os.replace(dst_tmp, dst)
 
                           tmp_link = src + ".symlink_tmp"
                           if os.path.lexists(tmp_link):
@@ -248,7 +263,7 @@ jobs:
             BUCKET=$((PCT / 10))
             ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
 
-            # Trigger offload at every 10% milestone (10%, 20%, ...) OR if local NVMe drops below 10GB
+            # Offload at every 10% milestone (10%, 20%, ...) OR if local NVMe drops below 10GB
             if [ "$BUCKET" -gt "$LAST_BUCKET" ] || [ "${ROOT_FREE_GB:-0}" -lt 10 ]; then
               echo "[$(date -u +%H:%M:%S)] Milestone ${PCT}% reached (Root free: ${ROOT_FREE_GB}G) — offloading completed artifacts..."
               offload_completed_artifacts

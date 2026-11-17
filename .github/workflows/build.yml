@@ -183,36 +183,40 @@ jobs:
           source build/envsetup.sh
 
           run_lunch_with_watchdog() {
+            local MAIN_PID=$$
             local attempt=1
             while [ $attempt -le 2 ]; do
-              echo "[$(date -u +%H:%M:%S)] Starting lunch attempt $attempt..."
-              lunch lineage_8492A-userdebug > /tmp/lunch.log 2>&1 &
-              local LPID=$!
-              local elapsed=0
+              echo "[$(date -u +%H:%M:%S)] Starting lunch attempt $attempt in foreground shell..."
+              rm -f /tmp/lunch_done
+              (
+                elapsed=0
+                while [ ! -f /tmp/lunch_done ]; do
+                  sleep 30
+                  elapsed=$((elapsed + 30))
+                  ACTIVE_PROC=$(ps -eo comm,pcpu,rss --sort=-pcpu | grep -E 'soong|ckati|go|find' | head -n 2 | tr '\n' '; ')
+                  echo "[$(date -u +%H:%M:%S)] lunch running (${elapsed}s) | Active: ${ACTIVE_PROC:-waiting}"
+                  if [ $elapsed -ge 720 ]; then
+                    echo "=== lunch stalled at ${elapsed}s — killing hung soong_ui/ckati ==="
+                    pkill -9 -f 'soong_ui|ckati' 2>/dev/null || true
+                    break
+                  fi
+                done
+              ) &
+              local WATCHDOG_PID=$!
 
-              while kill -0 $LPID 2>/dev/null; do
-                sleep 30
-                elapsed=$((elapsed + 30))
-                ACTIVE_PROC=$(ps -eo comm,pcpu,rss --sort=-pcpu | grep -E 'soong|ckati|go|find' | head -n 2 | tr '\n' '; ')
-                echo "[$(date -u +%H:%M:%S)] lunch running (${elapsed}s) | Active: ${ACTIVE_PROC:-waiting}"
-
-                if [ $elapsed -ge 720 ]; then
-                  echo "=== lunch stalled at ${elapsed}s — resetting out/soong/.bootstrap and retrying ==="
-                  kill -9 $LPID 2>/dev/null || true
-                  pkill -9 -f 'soong_ui|ckati' 2>/dev/null || true
-                  rm -rf out/soong/.bootstrap out/.lock
-                  break
-                fi
-              done
-
-              if wait $LPID 2>/dev/null; then
-                cat /tmp/lunch.log
+              if lunch lineage_8492A-userdebug; then
+                touch /tmp/lunch_done
+                kill $WATCHDOG_PID 2>/dev/null || true
+                echo "=== Verified TARGET_PRODUCT=${TARGET_PRODUCT} TARGET_BUILD_VARIANT=${TARGET_BUILD_VARIANT} ==="
                 return 0
               fi
+
+              touch /tmp/lunch_done
+              kill $WATCHDOG_PID 2>/dev/null || true
+              rm -rf out/soong/.bootstrap out/.lock
               attempt=$((attempt + 1))
             done
             echo "=== lunch failed after 2 attempts ==="
-            cat /tmp/lunch.log
             return 1
           }
 

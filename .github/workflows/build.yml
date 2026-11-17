@@ -173,9 +173,53 @@ jobs:
           export DONT_DEXPREOPT_PREBUILTS=true
           export _JAVA_OPTIONS="-Xmx6g"
 
+          echo "=== Dropping page cache & tuning Go runtime before lunch ==="
+          sync
+          echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+          export GOMAXPROCS=3
+          export SOONG_UI_LOG_LEVEL=INFO
+
           echo "=== Running envsetup and lunch on local NVMe ==="
           source build/envsetup.sh
-          lunch lineage_8492A-userdebug
+
+          run_lunch_with_watchdog() {
+            local attempt=1
+            while [ $attempt -le 2 ]; do
+              echo "[$(date -u +%H:%M:%S)] Starting lunch attempt $attempt..."
+              lunch lineage_8492A-userdebug > /tmp/lunch.log 2>&1 &
+              local LPID=$!
+              local elapsed=0
+
+              while kill -0 $LPID 2>/dev/null; do
+                sleep 30
+                elapsed=$((elapsed + 30))
+                ACTIVE_PROC=$(ps -eo comm,pcpu,rss --sort=-pcpu | grep -E 'soong|ckati|go|find' | head -n 2 | tr '\n' '; ')
+                echo "[$(date -u +%H:%M:%S)] lunch running (${elapsed}s) | Active: ${ACTIVE_PROC:-waiting}"
+
+                if [ $elapsed -ge 720 ]; then
+                  echo "=== lunch stalled at ${elapsed}s — resetting out/soong/.bootstrap and retrying ==="
+                  kill -9 $LPID 2>/dev/null || true
+                  pkill -9 -f 'soong_ui|ckati' 2>/dev/null || true
+                  rm -rf out/soong/.bootstrap out/.lock
+                  break
+                fi
+              done
+
+              if wait $LPID 2>/dev/null; then
+                cat /tmp/lunch.log
+                return 0
+              fi
+              attempt=$((attempt + 1))
+            done
+            echo "=== lunch failed after 2 attempts ==="
+            cat /tmp/lunch.log
+            return 1
+          }
+
+          run_lunch_with_watchdog
+
+          # Restore full Go parallelism for compilation
+          unset GOMAXPROCS
 
           # Only remove .repo so all prebuilt and CTS Android.bp source paths stay intact
           rm -rf .repo
@@ -340,4 +384,3 @@ jobs:
         if: always()
         run: |
           fusermount -u /mnt/remote_out || true
-          

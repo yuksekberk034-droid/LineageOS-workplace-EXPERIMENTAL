@@ -263,78 +263,59 @@ jobs:
           EOF
 
           offload_completed_artifacts() {
-            python3 - << 'EOF'
-          import os, subprocess, time
+            local PAUSED=0
+            local CUR_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
+            if [ "${CUR_FREE_GB:-0}" -lt 8 ] && kill -0 $BUILD_PID 2>/dev/null; then
+              echo "=== Low disk (${CUR_FREE_GB}G free) — pausing compiler workers during offload ==="
+              pkill -STOP -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
+              PAUSED=1
+            fi
 
-          now = time.time()
-          scan_roots = ["out/soong/.intermediates", "out/target"]
-          candidates = []
-          total_bytes = 0
+            # C-level find skips symlinks via d_type in ~1-2s (replaces slow Python os.walk)
+            find out/soong/.intermediates out/target -type f ! -type l -size +1M -mmin +1 2>/dev/null > /tmp/offload_list.txt || true
 
-          for base in scan_roots:
-              if not os.path.exists(base):
-                  continue
-              for root, _, files in os.walk(base):
-                  for fname in files:
-                      src = os.path.join(root, fname)
-                      try:
-                          if os.path.islink(src):
-                              continue
-                          st = os.stat(src)
-                          # Only offload large artifacts >= 1MB untouched for >= 45s
-                          if st.st_size < 1048576 or (now - st.st_mtime) < 45:
-                              continue
-                          candidates.append((src, st.st_size))
-                          total_bytes += st.st_size
-                      except OSError:
-                          pass
+            if [ ! -s /tmp/offload_list.txt ]; then
+              echo "=== No new completed files larger than 1MB to offload ==="
+              [ $PAUSED -eq 1 ] && pkill -CONT -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
+              return 0
+            fi
 
-          if not candidates:
-              print("=== No new completed files >= 1MB to offload ===")
-              raise SystemExit(0)
+            local REMOTE_DIR="${REMOTE_PATH}/offload"
 
-          list_path = "/tmp/offload_list.txt"
-          with open(list_path, "w") as f:
-              for src, _ in candidates:
-                  f.write(src + "\n")
+            if tar -cf - -T /tmp/offload_list.txt | ssh -i "$HOME/.ssh/id_ed25519" \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o Compression=yes \
+              -c aes128-gcm@openssh.com \
+              "${R_USER}@${R_HOST}" \
+              "mkdir -p '${REMOTE_DIR}' && tar -xf - -C '${REMOTE_DIR}'"; then
 
-          r_user = os.environ["R_USER"]
-          r_host = os.environ["R_HOST"]
-          remote_dir = os.environ["REMOTE_PATH"] + "/offload"
+              python3 - << 'EOF'
+          import os
 
-          tar_cmd = ["tar", "-cf", "-", "-T", list_path]
-          ssh_cmd = [
-              "ssh", "-i", os.path.expanduser("~/.ssh/id_ed25519"),
-              "-o", "StrictHostKeyChecking=no",
-              "-o", "UserKnownHostsFile=/dev/null",
-              "-o", "Compression=yes",
-              "-c", "aes128-gcm@openssh.com",
-              f"{r_user}@{r_host}",
-              f"mkdir -p '{remote_dir}' && tar -xf - -C '{remote_dir}'"
-          ]
-
-          p1 = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE)
-          p2 = subprocess.Popen(ssh_cmd, stdin=p1.stdout)
-          p1.stdout.close()
-          if p2.wait() != 0 or p1.wait() != 0:
-              print("=== Bulk tar offload encountered an error; will retry next cycle ===")
-              raise SystemExit(0)
-
-          # Replace streamed files directly on local NVMe without FUSE stat() round-trips
-          replaced = 0
-          for src, _ in candidates:
-              dst = os.path.join("/mnt/remote_out/offload", src)
-              try:
-                  if not os.path.islink(src):
-                      os.unlink(src)
-                      os.symlink(dst, src)
-                      replaced += 1
-              except OSError:
-                  pass
-
-          print(f"=== Bulk-offloaded {replaced} large files ({total_bytes / (1024**3):.2f} GB) at full line speed ===")
+          replaced, total_bytes = 0, 0
+          with open("/tmp/offload_list.txt") as f:
+              for line in f:
+                  src = line.strip()
+                  if not src:
+                      continue
+                  dst = os.path.join("/mnt/remote_out/offload", src)
+                  try:
+                      if not os.path.islink(src):
+                          total_bytes += os.path.getsize(src)
+                          os.unlink(src)
+                          os.symlink(dst, src)
+                          replaced += 1
+                  except OSError:
+                      pass
+          print(f"=== Bulk-offloaded {replaced} large files ({total_bytes / (1024**3):.2f} GB) ===")
           EOF
+            else
+              echo "=== Bulk tar offload encountered an error; will retry next cycle ==="
+            fi
+
             cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
+            [ $PAUSED -eq 1 ] && pkill -CONT -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
           }
 
           echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
@@ -364,14 +345,14 @@ jobs:
             echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Root free: ${ROOT_FREE} | Remote /out free: ${OUT_FREE}"
           done
 
-          wait $BUILD_PID
-          BUILD_STATUS=$?
+          BUILD_STATUS=0
+          wait $BUILD_PID || BUILD_STATUS=$?
 
           offload_completed_artifacts
 
           if [ $BUILD_STATUS -ne 0 ]; then
-            echo "=== BUILD FAILED — LAST 100 LINES OF build.log ==="
-            tail -n 100 build.log
+            echo "=== BUILD FAILED (exit code $BUILD_STATUS) — ERROR CONTEXT ==="
+            grep -B 5 -A 30 'FAILED:' build.log | tail -n 120 || tail -n 100 build.log
             exit 1
           fi
 

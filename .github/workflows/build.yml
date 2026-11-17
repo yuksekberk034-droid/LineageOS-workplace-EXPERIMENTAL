@@ -281,8 +281,8 @@ jobs:
                           if os.path.islink(src):
                               continue
                           st = os.stat(src)
-                          # Only offload files > 128KB untouched for at least 45 seconds
-                          if st.st_size < 131072 or (now - st.st_mtime) < 45:
+                          # Only offload large artifacts >= 1MB untouched for >= 45s
+                          if st.st_size < 1048576 or (now - st.st_mtime) < 45:
                               continue
                           candidates.append((src, st.st_size))
                           total_bytes += st.st_size
@@ -290,7 +290,7 @@ jobs:
                           pass
 
           if not candidates:
-              print("=== No new completed files >= 128KB to offload ===")
+              print("=== No new completed files >= 1MB to offload ===")
               raise SystemExit(0)
 
           list_path = "/tmp/offload_list.txt"
@@ -302,7 +302,6 @@ jobs:
           r_host = os.environ["R_HOST"]
           remote_dir = os.environ["REMOTE_PATH"] + "/offload"
 
-          # Stream all candidates in a single continuous SSH tar pipe at full line speed
           tar_cmd = ["tar", "-cf", "-", "-T", list_path]
           ssh_cmd = [
               "ssh", "-i", os.path.expanduser("~/.ssh/id_ed25519"),
@@ -321,22 +320,19 @@ jobs:
               print("=== Bulk tar offload encountered an error; will retry next cycle ===")
               raise SystemExit(0)
 
-          # Replace streamed files with symlinks to /mnt/remote_out/offload
+          # Replace streamed files directly on local NVMe without FUSE stat() round-trips
           replaced = 0
           for src, _ in candidates:
               dst = os.path.join("/mnt/remote_out/offload", src)
               try:
-                  if os.path.exists(dst) and not os.path.islink(src):
-                      tmp_link = src + ".symlink_tmp"
-                      if os.path.lexists(tmp_link):
-                          os.unlink(tmp_link)
-                      os.symlink(dst, tmp_link)
-                      os.replace(tmp_link, src)
+                  if not os.path.islink(src):
+                      os.unlink(src)
+                      os.symlink(dst, src)
                       replaced += 1
               except OSError:
                   pass
 
-          print(f"=== Bulk-offloaded {replaced} files ({total_bytes / (1024**3):.2f} GB) at full line speed ===")
+          print(f"=== Bulk-offloaded {replaced} large files ({total_bytes / (1024**3):.2f} GB) at full line speed ===")
           EOF
             cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
           }
@@ -350,13 +346,13 @@ jobs:
 
           while kill -0 $BUILD_PID 2>/dev/null; do
             sleep 60
-            PROGRESS=$(tr '\r' '\n' < build.log | grep -E '^\[ *[0-9]+%' | tail -n 1)
+            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
+            PROGRESS=$(tr '\r' '\n' < build.log | grep -E '^\[ *[0-9]+%' | grep -v '/398\]' | tail -n 1)
             PCT=$(echo "$PROGRESS" | sed -n 's/^\[ *\([0-9]\+\)%.*/\1/p')
             PCT=${PCT:-0}
             BUCKET=$((PCT / 5))
             ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
 
-            # Offload every 5% (5%, 10%, 15%...) OR whenever local NVMe drops below 15GB
             if [ "$BUCKET" -gt "$LAST_BUCKET" ] || [ "${ROOT_FREE_GB:-0}" -lt 15 ]; then
               echo "[$(date -u +%H:%M:%S)] Milestone ${PCT}% reached (Root free: ${ROOT_FREE_GB}G) — offloading completed artifacts..."
               offload_completed_artifacts

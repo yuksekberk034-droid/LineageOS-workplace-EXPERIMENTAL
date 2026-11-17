@@ -97,6 +97,7 @@ jobs:
         run: |
           R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
           R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
+          REMOTE_PATH="/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out"
 
           sudo mkdir -p /mnt/remote_out
           sudo chown -R "$USER:$USER" /mnt/remote_out
@@ -105,7 +106,14 @@ jobs:
           tailscale status
           tailscale ping --until-direct=false --timeout=30s --c=3 "$R_HOST" || true
 
-          sshfs "${R_USER}@${R_HOST}:/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out" \
+          echo "=== Ensuring Remote Directory Exists ==="
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=30 \
+            "${R_USER}@${R_HOST}" "mkdir -p '$REMOTE_PATH'"
+
+          sshfs "${R_USER}@${R_HOST}:${REMOTE_PATH}" \
             /mnt/remote_out \
             -o IdentityFile="$HOME/.ssh/id_ed25519" \
             -o StrictHostKeyChecking=no \
@@ -128,7 +136,7 @@ jobs:
 
           echo "=== Mounted Remote Storage ==="
           df -h /mnt/remote_out
-          
+
       - name: Initialize LineageOS Workspace
         run: |
           cd workspace
@@ -147,8 +155,9 @@ jobs:
           REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
         run: |
           cd workspace
-          R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
-          R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
+          export R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
+          export R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
+          export REMOTE_PATH="/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out"
 
           MNT_AVAIL_GB=$(df -BG /mnt | awk 'NR==2 {gsub("G",""); print $4}')
           if [ "${MNT_AVAIL_GB:-0}" -ge 8 ]; then
@@ -168,7 +177,7 @@ jobs:
           source build/envsetup.sh
           lunch lineage_8492A-userdebug
 
-          # Only remove .repo so every prebuilt and CTS Android.bp source path stays intact
+          # Only remove .repo so all prebuilt and CTS Android.bp source paths stay intact
           rm -rf .repo
           mkdir -p .repo/repo
           printf '#!/usr/bin/env python3\nimport sys\nprint("<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>\\n<manifest></manifest>")\n' > .repo/repo/repo
@@ -188,7 +197,7 @@ jobs:
             -o UserKnownHostsFile=/dev/null \
             -o ConnectTimeout=30 \
             "${R_USER}@${R_HOST}" \
-            "cd /run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out/offload && find out -type f ! -name '*.tmp'" \
+            "mkdir -p '${REMOTE_PATH}/offload' && cd '${REMOTE_PATH}/offload' && find out -type f ! -name '*.tmp' 2>/dev/null || true" \
             | python3 - << 'EOF'
           import os, sys
 
@@ -204,7 +213,7 @@ jobs:
                   linked += 1
           print(f"Linked {linked} cached artifacts from external drive")
           EOF
-          
+
           offload_completed_artifacts() {
             python3 - << 'EOF'
           import os, subprocess, time
@@ -243,7 +252,7 @@ jobs:
 
           r_user = os.environ["R_USER"]
           r_host = os.environ["R_HOST"]
-          remote_dir = "/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out/offload"
+          remote_dir = os.environ["REMOTE_PATH"] + "/offload"
 
           # Stream all candidates in a single continuous SSH tar pipe at full line speed
           tar_cmd = ["tar", "-cf", "-", "-T", list_path]
@@ -283,7 +292,6 @@ jobs:
           EOF
             cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
           }
-          
 
           echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
           df -h / /mnt/remote_out
@@ -294,14 +302,14 @@ jobs:
 
           while kill -0 $BUILD_PID 2>/dev/null; do
             sleep 60
-            PROGRESS=$(grep -E '^\[ *[0-9]+%' build.log | tail -n 1)
+            PROGRESS=$(tr '\r' '\n' < build.log | grep -E '^\[ *[0-9]+%' | tail -n 1)
             PCT=$(echo "$PROGRESS" | sed -n 's/^\[ *\([0-9]\+\)%.*/\1/p')
             PCT=${PCT:-0}
-            BUCKET=$((PCT / 10))
+            BUCKET=$((PCT / 5))
             ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
 
-            # Offload at every 10% milestone (10%, 20%, ...) OR if local NVMe drops below 10GB
-            if [ "$BUCKET" -gt "$LAST_BUCKET" ] || [ "${ROOT_FREE_GB:-0}" -lt 10 ]; then
+            # Offload every 5% (5%, 10%, 15%...) OR whenever local NVMe drops below 15GB
+            if [ "$BUCKET" -gt "$LAST_BUCKET" ] || [ "${ROOT_FREE_GB:-0}" -lt 15 ]; then
               echo "[$(date -u +%H:%M:%S)] Milestone ${PCT}% reached (Root free: ${ROOT_FREE_GB}G) — offloading completed artifacts..."
               offload_completed_artifacts
               LAST_BUCKET=$BUCKET
@@ -327,10 +335,9 @@ jobs:
           cp -f out/target/product/Freyr_10_1_WiFi/lineage-*.zip /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
           cp -f out/target/product/Freyr_10_1_WiFi/*.img /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
           ls -lh /mnt/remote_out/FINAL_ROM/
-          
-          
 
       - name: Unmount Remote Drive
         if: always()
         run: |
           fusermount -u /mnt/remote_out || true
+          

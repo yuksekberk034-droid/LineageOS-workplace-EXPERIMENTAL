@@ -262,29 +262,43 @@ jobs:
           print(f"Linked {linked} cached artifacts from external drive")
           EOF
 
+          # Reuse a single SSH control socket so offloads don't re-handshake over Tailscale DERP
+          SSH_CTL="/tmp/ssh_offload_ctl"
+          SSH_OPTS="-i $HOME/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=$SSH_CTL -o ControlPersist=15m"
+
           offload_completed_artifacts() {
+            local FORCE_LOW=${1:-0}
+
+            # Scan files > 256KB untouched for > 1 min, excluding final ROM images until 100%
+            find out/soong/.intermediates out/target -type f ! -type l -size +256k -mmin +1 ! -name 'lineage-*.zip' ! -name '*.img' -printf '%s\t%p\n' 2>/dev/null > /tmp/offload_sized.txt || true
+
+            local PENDING_BYTES=$(awk -F'\t' '{s+=$1} END {print s+0}' /tmp/offload_sized.txt)
+            local PENDING_GB=$(awk "BEGIN {printf \"%.2f\", $PENDING_BYTES / 1073741824}")
+
+            # Skip offload unless >= 1.50 GB is ready OR disk is critically low (< 4GB)
+            if [ "$PENDING_BYTES" -lt 1610612736 ] && [ "$FORCE_LOW" -eq 0 ]; then
+              echo "=== Skipping offload (only ${PENDING_GB} GB ready; waiting for >= 1.50 GB) ==="
+              return 0
+            fi
+
+            if [ "$PENDING_BYTES" -eq 0 ]; then
+              echo "=== No completed files >= 256KB available to offload ==="
+              return 0
+            fi
+
+            cut -f2- /tmp/offload_sized.txt > /tmp/offload_list.txt
+
             local PAUSED=0
             local CUR_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-            if [ "${CUR_FREE_GB:-0}" -lt 8 ] && kill -0 $BUILD_PID 2>/dev/null; then
-              echo "=== Low disk (${CUR_FREE_GB}G free) — pausing compiler workers during offload ==="
+            if [ "${CUR_FREE_GB:-0}" -lt 6 ] && kill -0 $BUILD_PID 2>/dev/null; then
+              echo "=== Critical disk (${CUR_FREE_GB}G free) — pausing compiler workers during ${PENDING_GB} GB offload ==="
               pkill -STOP -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
               PAUSED=1
             fi
 
-            # C-level find skips symlinks via d_type in ~1-2s (replaces slow Python os.walk)
-            find out/soong/.intermediates out/target -type f ! -type l -size +1M -mmin +1 2>/dev/null > /tmp/offload_list.txt || true
-
-            if [ ! -s /tmp/offload_list.txt ]; then
-              echo "=== No new completed files larger than 1MB to offload ==="
-              [ $PAUSED -eq 1 ] && pkill -CONT -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
-              return 0
-            fi
-
             local REMOTE_DIR="${REMOTE_PATH}/offload"
 
-            if tar -cf - -T /tmp/offload_list.txt | ssh -i "$HOME/.ssh/id_ed25519" \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
+            if tar -cf - -T /tmp/offload_list.txt | ssh $SSH_OPTS \
               -o Compression=yes \
               -c aes128-gcm@openssh.com \
               "${R_USER}@${R_HOST}" \
@@ -308,7 +322,7 @@ jobs:
                           replaced += 1
                   except OSError:
                       pass
-          print(f"=== Bulk-offloaded {replaced} large files ({total_bytes / (1024**3):.2f} GB) ===")
+          print(f"=== Bulk-offloaded {replaced} files ({total_bytes / (1024**3):.2f} GB) ===")
           EOF
             else
               echo "=== Bulk tar offload encountered an error; will retry next cycle ==="
@@ -321,22 +335,27 @@ jobs:
           echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
           df -h / /mnt/remote_out
 
-          mka bacon -j6 > build.log 2>&1 &
+          BUILD_LOG="$TMPDIR/build.log"
+          mka bacon -j6 > "$BUILD_LOG" 2>&1 &
           BUILD_PID=$!
           LAST_BUCKET=0
 
           while kill -0 $BUILD_PID 2>/dev/null; do
             sleep 60
             cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
-            PROGRESS=$(tr '\r' '\n' < build.log | grep -E '^\[ *[0-9]+%' | grep -v '/398\]' | tail -n 1)
+            PROGRESS=$(tr '\r' '\n' < "$BUILD_LOG" | grep -E '^\[ *[0-9]+%' | grep -v '/398\]' | tail -n 1)
             PCT=$(echo "$PROGRESS" | sed -n 's/^\[ *\([0-9]\+\)%.*/\1/p')
             PCT=${PCT:-0}
             BUCKET=$((PCT / 5))
             ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
 
-            if [ "$BUCKET" -gt "$LAST_BUCKET" ] || [ "${ROOT_FREE_GB:-0}" -lt 15 ]; then
-              echo "[$(date -u +%H:%M:%S)] Milestone ${PCT}% reached (Root free: ${ROOT_FREE_GB}G) — offloading completed artifacts..."
-              offload_completed_artifacts
+            if [ "${ROOT_FREE_GB:-0}" -lt 4 ]; then
+              echo "[$(date -u +%H:%M:%S)] Critical disk (${ROOT_FREE_GB}G free) — forcing offload..."
+              offload_completed_artifacts 1
+              LAST_BUCKET=$BUCKET
+            elif [ "$BUCKET" -gt "$LAST_BUCKET" ] || [ "${ROOT_FREE_GB:-0}" -lt 12 ]; then
+              echo "[$(date -u +%H:%M:%S)] Checking offload at ${PCT}% (Root free: ${ROOT_FREE_GB}G)..."
+              offload_completed_artifacts 0
               LAST_BUCKET=$BUCKET
             fi
 
@@ -348,11 +367,11 @@ jobs:
           BUILD_STATUS=0
           wait $BUILD_PID || BUILD_STATUS=$?
 
-          offload_completed_artifacts
+          offload_completed_artifacts 1
 
           if [ $BUILD_STATUS -ne 0 ]; then
             echo "=== BUILD FAILED (exit code $BUILD_STATUS) — ERROR CONTEXT ==="
-            grep -B 5 -A 30 'FAILED:' build.log | tail -n 120 || tail -n 100 build.log
+            grep -B 5 -A 30 'FAILED:' "$BUILD_LOG" | tail -n 120 || tail -n 100 "$BUILD_LOG"
             exit 1
           fi
 
@@ -360,6 +379,7 @@ jobs:
           cp -f out/target/product/Freyr_10_1_WiFi/lineage-*.zip /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
           cp -f out/target/product/Freyr_10_1_WiFi/*.img /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
           ls -lh /mnt/remote_out/FINAL_ROM/
+          
 
       - name: Unmount Remote Drive
         if: always()

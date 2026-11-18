@@ -171,7 +171,9 @@ jobs:
           export USE_CCACHE=0
           export WITH_DEXPREOPT=false
           export DONT_DEXPREOPT_PREBUILTS=true
+          export WITH_TIDY=false
           export _JAVA_OPTIONS="-Xmx6g"
+       
 
           echo "=== Dropping page cache & tuning Go runtime before lunch ==="
           sync
@@ -342,7 +344,6 @@ jobs:
 
           while kill -0 $BUILD_PID 2>/dev/null; do
             sleep 60
-            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
             PROGRESS=$(tr '\r' '\n' < "$BUILD_LOG" | grep -E '^\[ *[0-9]+%' | grep -v '/398\]' | tail -n 1)
             PCT=$(echo "$PROGRESS" | sed -n 's/^\[ *\([0-9]\+\)%.*/\1/p')
             PCT=${PCT:-0}

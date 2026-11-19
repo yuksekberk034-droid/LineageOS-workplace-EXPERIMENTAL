@@ -243,13 +243,16 @@ jobs:
           cp -f /mnt/remote_out/ninja_state/.ninja_log out/.ninja_log 2>/dev/null || true
           cp -f /mnt/remote_out/ninja_state/.ninja_deps out/.ninja_deps 2>/dev/null || true
 
-          if [ -f /mnt/remote_out/ninja_state/small_cache.tar.gz ]; then
-            echo "=== Restoring small intermediates cache to local NVMe ==="
-            tar -xzf /mnt/remote_out/ninja_state/small_cache.tar.gz 2>/dev/null || true
-          fi
-
           SSH_CTL="/tmp/ssh_offload_ctl"
           SSH_OPTS=(-i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath="$SSH_CTL" -o ControlPersist=15m)
+
+          if [ -f /mnt/remote_out/ninja_state/small_cache.tar.gz ]; then
+            echo "=== Streaming small intermediates cache to local NVMe ==="
+            ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
+              "${R_USER}@${R_HOST}" \
+              "cat '${REMOTE_PATH}/ninja_state/small_cache.tar.gz'" \
+              | tar -xzf - 2>/dev/null || true
+          fi
 
           echo "=== Linking previously offloaded artifacts from 110GB drive ==="
           ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
@@ -274,11 +277,22 @@ jobs:
           # Refresh timestamps so fresh repo sync mtimes do not invalidate cached outputs
           find out/soong/.intermediates out/target -mindepth 1 -exec touch -h {} + 2>/dev/null || true
 
-          SMALL_CACHE_SAVED=0
+          HANDOFF_FLAG="/tmp/handoff_triggered"
+          rm -f "$HANDOFF_FLAG"
+
+          save_small_cache_stream() {
+            echo "=== Streaming small (<256KB) intermediates to remote cache ==="
+            find out/soong/.intermediates out/target -type f ! -type l -size -256k 2>/dev/null \
+              | tar -cf - -T - 2>/dev/null | gzip -1 \
+              | ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
+                "${R_USER}@${R_HOST}" \
+                "cat > '${REMOTE_PATH}/ninja_state/small_cache.tar.gz.tmp' && mv -f '${REMOTE_PATH}/ninja_state/small_cache.tar.gz.tmp' '${REMOTE_PATH}/ninja_state/small_cache.tar.gz'" \
+              && echo "=== Updated small_cache.tar.gz on remote drive ===" || true
+          }
 
           offload_completed_artifacts() {
             local FORCE_LOW=${1:-0}
-            local SAVE_SMALL=${2:-0}
+            [ -f "$HANDOFF_FLAG" ] && return 0
 
             find out/soong/.intermediates out/target -type f ! -type l -size +256k -mmin +1 ! -name 'lineage-*.zip' ! -name '*.img' -printf '%s\t%p\n' 2>/dev/null > /tmp/offload_sized.txt || true
 
@@ -330,7 +344,7 @@ jobs:
           print(f"=== Bulk-offloaded {replaced} files ({total_bytes / (1024**3):.2f} GB) ===")
           EOF
               else
-                echo "=== Bulk tar offload encountered an error; will retry next cycle ==="
+                echo "=== Bulk tar offload interrupted or failed; will retry next cycle ==="
               fi
 
               [ $PAUSED -eq 1 ] && pkill -CONT -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
@@ -339,42 +353,38 @@ jobs:
             fi
 
             cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
-
-            if [ "$SAVE_SMALL" -eq 1 ] || { [ "${PCT:-0}" -ge 75 ] && [ "$SMALL_CACHE_SAVED" -eq 0 ]; }; then
-              echo "=== Packing small (<256KB) intermediates to remote cache ==="
-              if find out/soong/.intermediates out/target -type f ! -type l -size -256k 2>/dev/null \
-                | tar -cf - -T - 2>/dev/null | gzip -1 > "$TMPDIR/small_cache.tar.gz"; then
-                cp -f "$TMPDIR/small_cache.tar.gz" /mnt/remote_out/ninja_state/small_cache.tar.gz 2>/dev/null || true
-                SMALL_CACHE_SAVED=1
-                echo "=== Saved small_cache.tar.gz ($(du -h "$TMPDIR/small_cache.tar.gz" | awk '{print $1}')) ==="
-              fi
-            fi
           }
 
           echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
           df -h / /mnt/remote_out
 
           JOB_START_EPOCH=$(date +%s)
-          TIME_LIMIT_REACHED=0
           BUILD_LOG="$TMPDIR/build.log"
           mka bacon -j6 > "$BUILD_LOG" 2>&1 &
           BUILD_PID=$!
           LAST_BUCKET=0
 
-          while kill -0 $BUILD_PID 2>/dev/null; do
-            sleep 60
-            ELAPSED_SEC=$(( $(date +%s) - JOB_START_EPOCH ))
+          # Independent 335-minute (20100s) watchdog — cannot be blocked by long tar/ssh offloads
+          (
+            while true; do
+              sleep 30
+              NOW_EPOCH=$(date +%s)
+              if [ $((NOW_EPOCH - JOB_START_EPOCH)) -ge 20100 ]; then
+                echo "[$(date -u +%H:%M:%S)] WATCHDOG: 335-minute cutoff reached — interrupting active build/offload for clean handoff..."
+                touch "$HANDOFF_FLAG"
+                pkill -TERM -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
+                pkill -TERM -f 'tar -cf - -T /tmp/offload_list.txt' 2>/dev/null || true
+                sleep 5
+                pkill -9 -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
+                break
+              fi
+            done
+          ) &
+          WATCHDOG_TIMER_PID=$!
 
-            # Graceful cutoff at 340 minutes (20400s) so final offload & API dispatch finish before 360m kill
-            if [ "$ELAPSED_SEC" -ge 20400 ]; then
-              echo "[$(date -u +%H:%M:%S)] Reached 340-minute graceful cutoff — stopping compiler to save cache and chain next run..."
-              TIME_LIMIT_REACHED=1
-              kill -TERM $BUILD_PID 2>/dev/null || true
-              pkill -TERM -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
-              sleep 10
-              kill -9 $BUILD_PID 2>/dev/null || true
-              break
-            fi
+          while kill -0 $BUILD_PID 2>/dev/null && [ ! -f "$HANDOFF_FLAG" ]; do
+            sleep 60
+            [ -f "$HANDOFF_FLAG" ] && break
 
             PROGRESS=$(tr '\r' '\n' < "$BUILD_LOG" | grep -E '^\[ *[0-9]+%' | grep -v '/398\]' | tail -n 1 || true)
             PCT=$(echo "$PROGRESS" | sed -n 's/^\[ *\([0-9]\+\)%.*/\1/p')
@@ -384,11 +394,11 @@ jobs:
 
             if [ "${ROOT_FREE_GB:-0}" -lt 4 ]; then
               echo "[$(date -u +%H:%M:%S)] Critical disk (${ROOT_FREE_GB}G free) — forcing offload..."
-              offload_completed_artifacts 1 0
+              offload_completed_artifacts 1
               LAST_BUCKET=$BUCKET
             elif [ "$BUCKET" -gt "$LAST_BUCKET" ] || [ "${ROOT_FREE_GB:-0}" -lt 12 ]; then
               echo "[$(date -u +%H:%M:%S)] Checking offload at ${PCT}% (Root free: ${ROOT_FREE_GB}G)..."
-              offload_completed_artifacts 0 0
+              offload_completed_artifacts 0
               LAST_BUCKET=$BUCKET
             fi
 
@@ -397,9 +407,10 @@ jobs:
             echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Root free: ${ROOT_FREE} | Remote /out free: ${OUT_FREE}"
           done
 
-          if [ "$TIME_LIMIT_REACHED" -eq 1 ]; then
-            echo "=== Flushing final cache & small intermediates before chaining next run ==="
-            offload_completed_artifacts 1 1
+          if [ -f "$HANDOFF_FLAG" ]; then
+            echo "=== Flushing Ninja state & small cache before chaining next run ==="
+            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
+            save_small_cache_stream
 
             echo "=== Dispatching continuation workflow run ==="
             curl -fsSL -X POST \
@@ -413,16 +424,19 @@ jobs:
             exit 0
           fi
 
+          kill $WATCHDOG_TIMER_PID 2>/dev/null || true
           BUILD_STATUS=0
           wait $BUILD_PID || BUILD_STATUS=$?
 
-          offload_completed_artifacts 1 1
+          offload_completed_artifacts 1
 
           if [ $BUILD_STATUS -ne 0 ]; then
             echo "=== BUILD FAILED (exit code $BUILD_STATUS) — ERROR CONTEXT ==="
             grep -B 5 -A 30 'FAILED:' "$BUILD_LOG" | tail -n 120 || tail -n 100 "$BUILD_LOG"
             exit 1
           fi
+
+          save_small_cache_stream
 
           echo "=== Copying Final Flashable ROM to Local Drive ==="
           cp -f out/target/product/Freyr_10_1_WiFi/lineage-*.zip /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
@@ -433,4 +447,3 @@ jobs:
         if: always()
         run: |
           fusermount -u /mnt/remote_out || true
-          

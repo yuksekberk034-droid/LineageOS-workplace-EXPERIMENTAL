@@ -1,0 +1,38 @@
+name: Auto Resume Build on 6h Timeout
+
+on:
+  workflow_run:
+    workflows: ["Build LineageOS for TCL 8492A"]
+    types:
+      - completed
+
+permissions:
+  actions: write
+
+jobs:
+  resume-if-timed-out:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'cancelled'
+    steps:
+      - name: Check Duration and Re-Trigger Build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STARTED_AT: ${{ github.event.workflow_run.run_started_at }}
+          UPDATED_AT: ${{ github.event.workflow_run.updated_at }}
+        run: |
+          START_SEC=$(date -d "$STARTED_AT" +%s)
+          END_SEC=$(date -d "$UPDATED_AT" +%s)
+          DURATION_MIN=$(( (END_SEC - START_SEC) / 60 ))
+          echo "Previous run lasted ${DURATION_MIN} minutes."
+
+          if [ "$DURATION_MIN" -ge 350 ]; then
+            echo "6-hour timeout detected — dispatching next build run..."
+            curl -fsSL -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
+              -d "{\"ref\":\"${{ github.event.workflow_run.head_branch }}\"}"
+          else
+            echo "Run was canceled manually before 350 minutes — skipping auto-resume."
+          fi

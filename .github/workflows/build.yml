@@ -3,6 +3,10 @@ name: Build LineageOS for TCL 8492A
 on:
   workflow_dispatch:
 
+concurrency:
+  group: local-drive-offload
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -173,7 +177,6 @@ jobs:
           export DONT_DEXPREOPT_PREBUILTS=true
           export WITH_TIDY=false
           export _JAVA_OPTIONS="-Xmx6g"
-       
 
           echo "=== Dropping page cache & tuning Go runtime before lunch ==="
           sync
@@ -185,7 +188,6 @@ jobs:
           source build/envsetup.sh
 
           run_lunch_with_watchdog() {
-            local MAIN_PID=$$
             local attempt=1
             while [ $attempt -le 2 ]; do
               echo "[$(date -u +%H:%M:%S)] Starting lunch attempt $attempt in foreground shell..."
@@ -223,11 +225,8 @@ jobs:
           }
 
           run_lunch_with_watchdog
-
-          # Restore full Go parallelism for compilation
           unset GOMAXPROCS
 
-          # Only remove .repo so all prebuilt and CTS Android.bp source paths stay intact
           rm -rf .repo
           mkdir -p .repo/repo
           printf '#!/usr/bin/env python3\nimport sys\nprint("<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>\\n<manifest></manifest>")\n' > .repo/repo/repo
@@ -236,16 +235,20 @@ jobs:
           echo "=== Generating Ninja build graph on local NVMe ==="
           mka nothing -j$(nproc --all)
 
-          # Restore Ninja build logs and link all cached artifacts in seconds via SSH
           mkdir -p /mnt/remote_out/offload/out /mnt/remote_out/ninja_state /mnt/remote_out/FINAL_ROM
           cp -f /mnt/remote_out/ninja_state/.ninja_log out/.ninja_log 2>/dev/null || true
           cp -f /mnt/remote_out/ninja_state/.ninja_deps out/.ninja_deps 2>/dev/null || true
 
+          if [ -f /mnt/remote_out/ninja_state/small_cache.tar.gz ]; then
+            echo "=== Restoring small intermediates cache to local NVMe ==="
+            tar -xzf /mnt/remote_out/ninja_state/small_cache.tar.gz 2>/dev/null || true
+          fi
+
+          SSH_CTL="/tmp/ssh_offload_ctl"
+          SSH_OPTS=(-i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath="$SSH_CTL" -o ControlPersist=15m)
+
           echo "=== Linking previously offloaded artifacts from 110GB drive ==="
-          ssh -i "$HOME/.ssh/id_ed25519" \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=30 \
+          ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
             "${R_USER}@${R_HOST}" \
             "mkdir -p '${REMOTE_PATH}/offload' && cd '${REMOTE_PATH}/offload' && find out -type f ! -name '*.tmp' 2>/dev/null || true" \
             | python3 - << 'EOF'
@@ -264,20 +267,17 @@ jobs:
           print(f"Linked {linked} cached artifacts from external drive")
           EOF
 
-          # Reuse a single SSH control socket so offloads don't re-handshake over Tailscale DERP
-          SSH_CTL="/tmp/ssh_offload_ctl"
-          SSH_OPTS="-i $HOME/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=$SSH_CTL -o ControlPersist=15m"
+          # Refresh timestamps so fresh repo sync mtimes do not invalidate cached outputs
+          find out/soong/.intermediates out/target -mindepth 1 -exec touch -h {} + 2>/dev/null || true
 
           offload_completed_artifacts() {
             local FORCE_LOW=${1:-0}
 
-            # Scan files > 256KB untouched for > 1 min, excluding final ROM images until 100%
             find out/soong/.intermediates out/target -type f ! -type l -size +256k -mmin +1 ! -name 'lineage-*.zip' ! -name '*.img' -printf '%s\t%p\n' 2>/dev/null > /tmp/offload_sized.txt || true
 
             local PENDING_BYTES=$(awk -F'\t' '{s+=$1} END {print s+0}' /tmp/offload_sized.txt)
             local PENDING_GB=$(awk "BEGIN {printf \"%.2f\", $PENDING_BYTES / 1073741824}")
 
-            # Skip offload unless >= 1.50 GB is ready OR disk is critically low (< 4GB)
             if [ "$PENDING_BYTES" -lt 1610612736 ] && [ "$FORCE_LOW" -eq 0 ]; then
               echo "=== Skipping offload (only ${PENDING_GB} GB ready; waiting for >= 1.50 GB) ==="
               return 0
@@ -300,7 +300,7 @@ jobs:
 
             local REMOTE_DIR="${REMOTE_PATH}/offload"
 
-            if tar -cf - -T /tmp/offload_list.txt | ssh $SSH_OPTS \
+            if tar -cf - -T /tmp/offload_list.txt | ssh "${SSH_OPTS[@]}" \
               -o Compression=yes \
               -c aes128-gcm@openssh.com \
               "${R_USER}@${R_HOST}" \
@@ -331,6 +331,14 @@ jobs:
             fi
 
             cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
+
+            if [ "${PCT:-0}" -ge 75 ]; then
+              echo "=== Packing small (<256KB) intermediates to remote cache ==="
+              find out/soong/.intermediates out/target -type f ! -type l -size -256k 2>/dev/null \
+                | tar -cf - -T - 2>/dev/null | gzip -1 > "$TMPDIR/small_cache.tar.gz" \
+                && cp -f "$TMPDIR/small_cache.tar.gz" /mnt/remote_out/ninja_state/small_cache.tar.gz || true
+            fi
+
             [ $PAUSED -eq 1 ] && pkill -CONT -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
           }
 
@@ -380,9 +388,9 @@ jobs:
           cp -f out/target/product/Freyr_10_1_WiFi/lineage-*.zip /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
           cp -f out/target/product/Freyr_10_1_WiFi/*.img /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
           ls -lh /mnt/remote_out/FINAL_ROM/
-          
 
       - name: Unmount Remote Drive
         if: always()
         run: |
           fusermount -u /mnt/remote_out || true
+          

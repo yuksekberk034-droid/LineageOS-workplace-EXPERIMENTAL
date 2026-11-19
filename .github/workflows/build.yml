@@ -162,7 +162,6 @@ jobs:
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
         run: |
-          set -o pipefail
           cd workspace
           export R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
           export R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
@@ -377,7 +376,7 @@ jobs:
               break
             fi
 
-            PROGRESS=$(tr '\r' '\n' < "$BUILD_LOG" | grep -E '^\[ *[0-9]+%' | grep -v '/398\]' | tail -n 1)
+            PROGRESS=$(tr '\r' '\n' < "$BUILD_LOG" | grep -E '^\[ *[0-9]+%' | grep -v '/398\]' | tail -n 1 || true)
             PCT=$(echo "$PROGRESS" | sed -n 's/^\[ *\([0-9]\+\)%.*/\1/p')
             PCT=${PCT:-0}
             BUCKET=$((PCT / 5))

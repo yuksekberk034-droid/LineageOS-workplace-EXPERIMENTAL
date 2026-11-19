@@ -7,6 +7,10 @@ concurrency:
   group: local-drive-offload
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -158,6 +162,7 @@ jobs:
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
         run: |
+          set -o pipefail
           cd workspace
           export R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
           export R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
@@ -270,8 +275,11 @@ jobs:
           # Refresh timestamps so fresh repo sync mtimes do not invalidate cached outputs
           find out/soong/.intermediates out/target -mindepth 1 -exec touch -h {} + 2>/dev/null || true
 
+          SMALL_CACHE_SAVED=0
+
           offload_completed_artifacts() {
             local FORCE_LOW=${1:-0}
+            local SAVE_SMALL=${2:-0}
 
             find out/soong/.intermediates out/target -type f ! -type l -size +256k -mmin +1 ! -name 'lineage-*.zip' ! -name '*.img' -printf '%s\t%p\n' 2>/dev/null > /tmp/offload_sized.txt || true
 
@@ -283,30 +291,26 @@ jobs:
               return 0
             fi
 
-            if [ "$PENDING_BYTES" -eq 0 ]; then
-              echo "=== No completed files >= 256KB available to offload ==="
-              return 0
-            fi
+            if [ "$PENDING_BYTES" -gt 0 ]; then
+              cut -f2- /tmp/offload_sized.txt > /tmp/offload_list.txt
 
-            cut -f2- /tmp/offload_sized.txt > /tmp/offload_list.txt
+              local PAUSED=0
+              local CUR_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
+              if [ "${CUR_FREE_GB:-0}" -lt 6 ] && kill -0 $BUILD_PID 2>/dev/null; then
+                echo "=== Critical disk (${CUR_FREE_GB}G free) — pausing compiler workers during ${PENDING_GB} GB offload ==="
+                pkill -STOP -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
+                PAUSED=1
+              fi
 
-            local PAUSED=0
-            local CUR_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-            if [ "${CUR_FREE_GB:-0}" -lt 6 ] && kill -0 $BUILD_PID 2>/dev/null; then
-              echo "=== Critical disk (${CUR_FREE_GB}G free) — pausing compiler workers during ${PENDING_GB} GB offload ==="
-              pkill -STOP -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
-              PAUSED=1
-            fi
+              local REMOTE_DIR="${REMOTE_PATH}/offload"
 
-            local REMOTE_DIR="${REMOTE_PATH}/offload"
+              if tar -cf - -T /tmp/offload_list.txt | ssh "${SSH_OPTS[@]}" \
+                -o Compression=yes \
+                -c aes128-gcm@openssh.com \
+                "${R_USER}@${R_HOST}" \
+                "mkdir -p '${REMOTE_DIR}' && tar -xf - -C '${REMOTE_DIR}'"; then
 
-            if tar -cf - -T /tmp/offload_list.txt | ssh "${SSH_OPTS[@]}" \
-              -o Compression=yes \
-              -c aes128-gcm@openssh.com \
-              "${R_USER}@${R_HOST}" \
-              "mkdir -p '${REMOTE_DIR}' && tar -xf - -C '${REMOTE_DIR}'"; then
-
-              python3 - << 'EOF'
+                python3 - << 'EOF'
           import os
 
           replaced, total_bytes = 0, 0
@@ -326,25 +330,33 @@ jobs:
                       pass
           print(f"=== Bulk-offloaded {replaced} files ({total_bytes / (1024**3):.2f} GB) ===")
           EOF
+              else
+                echo "=== Bulk tar offload encountered an error; will retry next cycle ==="
+              fi
+
+              [ $PAUSED -eq 1 ] && pkill -CONT -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
             else
-              echo "=== Bulk tar offload encountered an error; will retry next cycle ==="
+              echo "=== No completed files >= 256KB available to offload ==="
             fi
 
             cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
 
-            if [ "${PCT:-0}" -ge 75 ]; then
+            if [ "$SAVE_SMALL" -eq 1 ] || { [ "${PCT:-0}" -ge 75 ] && [ "$SMALL_CACHE_SAVED" -eq 0 ]; }; then
               echo "=== Packing small (<256KB) intermediates to remote cache ==="
-              find out/soong/.intermediates out/target -type f ! -type l -size -256k 2>/dev/null \
-                | tar -cf - -T - 2>/dev/null | gzip -1 > "$TMPDIR/small_cache.tar.gz" \
-                && cp -f "$TMPDIR/small_cache.tar.gz" /mnt/remote_out/ninja_state/small_cache.tar.gz || true
+              if find out/soong/.intermediates out/target -type f ! -type l -size -256k 2>/dev/null \
+                | tar -cf - -T - 2>/dev/null | gzip -1 > "$TMPDIR/small_cache.tar.gz"; then
+                cp -f "$TMPDIR/small_cache.tar.gz" /mnt/remote_out/ninja_state/small_cache.tar.gz 2>/dev/null || true
+                SMALL_CACHE_SAVED=1
+                echo "=== Saved small_cache.tar.gz ($(du -h "$TMPDIR/small_cache.tar.gz" | awk '{print $1}')) ==="
+              fi
             fi
-
-            [ $PAUSED -eq 1 ] && pkill -CONT -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
           }
 
           echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
           df -h / /mnt/remote_out
 
+          JOB_START_EPOCH=$(date +%s)
+          TIME_LIMIT_REACHED=0
           BUILD_LOG="$TMPDIR/build.log"
           mka bacon -j6 > "$BUILD_LOG" 2>&1 &
           BUILD_PID=$!
@@ -352,6 +364,19 @@ jobs:
 
           while kill -0 $BUILD_PID 2>/dev/null; do
             sleep 60
+            ELAPSED_SEC=$(( $(date +%s) - JOB_START_EPOCH ))
+
+            # Graceful cutoff at 340 minutes (20400s) so final offload & API dispatch finish before 360m kill
+            if [ "$ELAPSED_SEC" -ge 20400 ]; then
+              echo "[$(date -u +%H:%M:%S)] Reached 340-minute graceful cutoff — stopping compiler to save cache and chain next run..."
+              TIME_LIMIT_REACHED=1
+              kill -TERM $BUILD_PID 2>/dev/null || true
+              pkill -TERM -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
+              sleep 10
+              kill -9 $BUILD_PID 2>/dev/null || true
+              break
+            fi
+
             PROGRESS=$(tr '\r' '\n' < "$BUILD_LOG" | grep -E '^\[ *[0-9]+%' | grep -v '/398\]' | tail -n 1)
             PCT=$(echo "$PROGRESS" | sed -n 's/^\[ *\([0-9]\+\)%.*/\1/p')
             PCT=${PCT:-0}
@@ -360,11 +385,11 @@ jobs:
 
             if [ "${ROOT_FREE_GB:-0}" -lt 4 ]; then
               echo "[$(date -u +%H:%M:%S)] Critical disk (${ROOT_FREE_GB}G free) — forcing offload..."
-              offload_completed_artifacts 1
+              offload_completed_artifacts 1 0
               LAST_BUCKET=$BUCKET
             elif [ "$BUCKET" -gt "$LAST_BUCKET" ] || [ "${ROOT_FREE_GB:-0}" -lt 12 ]; then
               echo "[$(date -u +%H:%M:%S)] Checking offload at ${PCT}% (Root free: ${ROOT_FREE_GB}G)..."
-              offload_completed_artifacts 0
+              offload_completed_artifacts 0 0
               LAST_BUCKET=$BUCKET
             fi
 
@@ -373,10 +398,26 @@ jobs:
             echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Root free: ${ROOT_FREE} | Remote /out free: ${OUT_FREE}"
           done
 
+          if [ "$TIME_LIMIT_REACHED" -eq 1 ]; then
+            echo "=== Flushing final cache & small intermediates before chaining next run ==="
+            offload_completed_artifacts 1 1
+
+            echo "=== Dispatching continuation workflow run ==="
+            curl -fsSL -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
+              -d "{\"ref\":\"${{ github.ref_name }}\"}"
+
+            echo "=== Next workflow run queued successfully ==="
+            exit 0
+          fi
+
           BUILD_STATUS=0
           wait $BUILD_PID || BUILD_STATUS=$?
 
-          offload_completed_artifacts 1
+          offload_completed_artifacts 1 1
 
           if [ $BUILD_STATUS -ne 0 ]; then
             echo "=== BUILD FAILED (exit code $BUILD_STATUS) — ERROR CONTEXT ==="

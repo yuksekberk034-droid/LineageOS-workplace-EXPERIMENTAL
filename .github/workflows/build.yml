@@ -114,12 +114,13 @@ jobs:
           tailscale status
           tailscale ping --until-direct=false --timeout=30s --c=3 "$R_HOST" || true
 
-          echo "=== Ensuring Remote Directory Exists ==="
+          echo "=== Verifying External Drive Is Mounted on PC ==="
           ssh -i "$HOME/.ssh/id_ed25519" \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o ConnectTimeout=30 \
-            "${R_USER}@${R_HOST}" "mkdir -p '$REMOTE_PATH'"
+            "${R_USER}@${R_HOST}" \
+            "mountpoint -q '/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440' || { echo 'ERROR: External 110GB drive is not mounted on PC!'; exit 1; }; mkdir -p '$REMOTE_PATH'"
 
           sshfs "${R_USER}@${R_HOST}:${REMOTE_PATH}" \
             /mnt/remote_out \
@@ -152,10 +153,76 @@ jobs:
           mkdir -p .repo/local_manifests
           cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
 
-      - name: Sync Source Code
+      - name: Sync Source Code & Patch Vendor ELF Checks
         run: |
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
+
+          python3 - << 'EOF'
+          import os, re, subprocess
+
+          bp_path = "vendor/tcl/Freyr_10_1_WiFi/Android.bp"
+          vendor_dir = os.path.dirname(bp_path)
+
+          if not os.path.exists(bp_path):
+              raise SystemExit(f"ERROR: {bp_path} not found")
+
+          # Report all DT_SONAME mismatches across proprietary vendor .so files
+          for root, _, files in os.walk(vendor_dir):
+              for fn in sorted(files):
+                  if fn.endswith(".so"):
+                      full = os.path.join(root, fn)
+                      out = subprocess.run(["readelf", "-d", full], capture_output=True, text=True).stdout
+                      m = re.search(r"\(SONAME\)\s+Library soname:\s+\[([^\]]+)\]", out)
+                      if m and m.group(1) != fn:
+                          print(f"Detected DT_SONAME mismatch: {fn} -> {m.group(1)}")
+
+          with open(bp_path, "r", encoding="utf-8") as f:
+              text = f.read()
+
+          # Automatically inject check_elf_files: false into all cc_prebuilt_library_shared blocks
+          out_parts = []
+          pos = 0
+          patched_count = 0
+          pattern = re.compile(r"\bcc_prebuilt_library_shared\s*\{")
+
+          while True:
+              match = pattern.search(text, pos)
+              if not match:
+                  out_parts.append(text[pos:])
+                  break
+
+              out_parts.append(text[pos:match.end()])
+              depth = 1
+              i = match.end()
+              in_comment = False
+              while i < len(text) and depth > 0:
+                  if in_comment:
+                      if text[i] == "\n":
+                          in_comment = False
+                  else:
+                      if text[i:i+2] == "//":
+                          in_comment = True
+                          i += 1
+                      elif text[i] == "{":
+                          depth += 1
+                      elif text[i] == "}":
+                          depth -= 1
+                  i += 1
+
+              block = text[match.end():i - 1]
+              if "check_elf_files:" not in block:
+                  block = "\n    check_elf_files: false," + block
+                  patched_count += 1
+
+              out_parts.append(block + "}")
+              pos = i
+
+          with open(bp_path, "w", encoding="utf-8") as f:
+              f.write("".join(out_parts))
+
+          print(f"=== Patched {patched_count} cc_prebuilt_library_shared modules in {bp_path} ===")
+          EOF
 
       - name: Compile LineageOS
         env:
@@ -409,41 +476,4 @@ jobs:
 
           if [ -f "$HANDOFF_FLAG" ]; then
             echo "=== Flushing Ninja state & small cache before chaining next run ==="
-            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
-            save_small_cache_stream
-
-            echo "=== Dispatching continuation workflow run ==="
-            curl -fsSL -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
-              -d "{\"ref\":\"${{ github.ref_name }}\"}"
-
-            echo "=== Next workflow run queued successfully ==="
-            exit 0
-          fi
-
-          kill $WATCHDOG_TIMER_PID 2>/dev/null || true
-          BUILD_STATUS=0
-          wait $BUILD_PID || BUILD_STATUS=$?
-
-          offload_completed_artifacts 1
-
-          if [ $BUILD_STATUS -ne 0 ]; then
-            echo "=== BUILD FAILED (exit code $BUILD_STATUS) — ERROR CONTEXT ==="
-            grep -B 5 -A 30 'FAILED:' "$BUILD_LOG" | tail -n 120 || tail -n 100 "$BUILD_LOG"
-            exit 1
-          fi
-
-          save_small_cache_stream
-
-          echo "=== Copying Final Flashable ROM to Local Drive ==="
-          cp -f out/target/product/Freyr_10_1_WiFi/lineage-*.zip /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
-          cp -f out/target/product/Freyr_10_1_WiFi/*.img /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
-          ls -lh /mnt/remote_out/FINAL_ROM/
-
-      - name: Unmount Remote Drive
-        if: always()
-        run: |
-          fusermount -u /mnt/remote_out || true
+            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null

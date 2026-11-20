@@ -98,14 +98,14 @@ jobs:
           EOF
           ssh-keygen -y -f "$HOME/.ssh/id_ed25519" > /dev/null
 
-      - name: Mount Local 110GB Drive for Heavy Artifacts
+      - name: Mount Android Termux Storage for Heavy Artifacts
         env:
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
         run: |
           R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
           R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
-          REMOTE_PATH="/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out"
+          REMOTE_PATH="/data/data/com.termux/files/home/lineage_out"
 
           sudo mkdir -p /mnt/remote_out
           sudo chown -R "$USER:$USER" /mnt/remote_out
@@ -114,16 +114,17 @@ jobs:
           tailscale status
           tailscale ping --until-direct=false --timeout=30s --c=3 "$R_HOST" || true
 
-          echo "=== Verifying External Drive Is Mounted on PC ==="
-          ssh -i "$HOME/.ssh/id_ed25519" \
+          echo "=== Verifying Termux SSH & Storage on Android ==="
+          ssh -p 8022 -i "$HOME/.ssh/id_ed25519" \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o ConnectTimeout=30 \
             "${R_USER}@${R_HOST}" \
-            "mountpoint -q '/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440' || { echo 'ERROR: External 110GB drive is not mounted on PC!'; exit 1; }; mkdir -p '$REMOTE_PATH'"
+            "mkdir -p '$REMOTE_PATH' && df -h '$REMOTE_PATH'"
 
           sshfs "${R_USER}@${R_HOST}:${REMOTE_PATH}" \
             /mnt/remote_out \
+            -p 8022 \
             -o IdentityFile="$HOME/.ssh/id_ed25519" \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
@@ -232,7 +233,7 @@ jobs:
           cd workspace
           export R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
           export R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
-          export REMOTE_PATH="/run/media/berk/8cef65af-f6fa-4041-8d9a-982f64a26440/lineage_out"
+          export REMOTE_PATH="/data/data/com.termux/files/home/lineage_out"
 
           MNT_AVAIL_GB=$(df -BG /mnt | awk 'NR==2 {gsub("G",""); print $4}')
           if [ "${MNT_AVAIL_GB:-0}" -ge 8 ]; then

@@ -312,7 +312,7 @@ jobs:
           cp -f /mnt/remote_out/ninja_state/.ninja_deps out/.ninja_deps 2>/dev/null || true
 
           SSH_CTL="/tmp/ssh_offload_ctl"
-          SSH_OPTS=(-i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath="$SSH_CTL" -o ControlPersist=15m)
+          SSH_OPTS=(-p 8022 -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath="$SSH_CTL" -o ControlPersist=15m)
 
           if [ -f /mnt/remote_out/ninja_state/small_cache.tar.gz ]; then
             echo "=== Streaming small intermediates cache to local NVMe ==="

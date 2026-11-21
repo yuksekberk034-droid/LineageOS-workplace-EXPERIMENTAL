@@ -91,12 +91,22 @@ jobs:
           tailscale ping --until-direct=false --timeout=30s --c=3 "$R_HOST" || true
 
           echo "=== Verifying Termux SSH & Storage on Android ==="
-          ssh -p 8022 -i "$HOME/.ssh/id_ed25519" \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=30 \
-            "${R_USER}@${R_HOST}" \
-            "mkdir -p '$REMOTE_PATH' && df -h '$REMOTE_PATH'"
+          SSH_READY=0
+          for i in 1 2 3 4 5; do
+            echo "SSH attempt $i/5 to ${R_HOST}:8022..."
+            if ssh -p 8022 -i "$HOME/.ssh/id_ed25519" \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=30 \
+              -o ServerAliveInterval=15 \
+              "${R_USER}@${R_HOST}" \
+              "mkdir -p '$REMOTE_PATH' && df -h '$REMOTE_PATH'"; then
+              SSH_READY=1
+              break
+            fi
+            sleep 10
+          done
+          [ "$SSH_READY" -eq 1 ] || { echo "ERROR: Could not reach Termux sshd on port 8022 after 5 attempts"; exit 1; }
 
           sshfs "${R_USER}@${R_HOST}:${REMOTE_PATH}" \
             /mnt/remote_out \
@@ -108,7 +118,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -o ServerAliveInterval=15 \
             -o ServerAliveCountMax=6 \
-            -o ConnectTimeout=30 \
+            -o ConnectTimeout=45 \
             -o reconnect \
             -o cache=yes \
             -o kernel_cache \
@@ -402,4 +412,3 @@ jobs:
         if: always()
         run: |
           fusermount -u /mnt/remote_out || true
-          

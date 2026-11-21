@@ -134,8 +134,7 @@ jobs:
         run: |
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
-                 python3 -c 'exec("import re\np=\"vendor/tcl/Freyr_10_1_WiFi/Android.bp\"\nt=open(p,encoding=\"utf-8\").read()\nout=[];pos=0;patched=0\nfor m in re.finditer(r\"\\bcc_prebuilt_library_shared\\s*\\{\",t):\n if m.start()<pos:continue\n out.append(t[pos:m.end()])\n i=m.end();d=1;s=False;c=False\n while i<len(t) and d>0:\n  ch=t[i]\n  if c:\n   if ch==\"\\n\":c=False\n  elif s:\n   if ch==\"\\\\\":i+=1\n   elif ch==\"\\\"\":s=False\n  else:\n   if t[i:i+2]==\"//\":c=True;i+=1\n   elif ch==\"\\\"\":s=True\n   elif ch==\"{\":d+=1\n   elif ch==\"}\":d-=1\n  i+=1\n blk=re.sub(r\"\\bcheck_elf_files\\s*:\\s*true\\b\",\"check_elf_files: false\",t[m.end():i-1])\n if not re.search(r\"\\bcheck_elf_files\\s*:\",blk):blk=\"\\n    check_elf_files: false,\"+blk;patched+=1\n out.append(blk+\"}\");pos=i\nout.append(t[pos:])\nopen(p,\"w\",encoding=\"utf-8\").write(\"\".join(out))\nprint(\"Patched modules:\",patched)")'
-
+          python3 -c 'exec("import re\np=\"vendor/tcl/Freyr_10_1_WiFi/Android.bp\"\nt=open(p,encoding=\"utf-8\").read()\nout=[];pos=0;patched=0\nfor m in re.finditer(r\"\\bcc_prebuilt_library_shared\\s*\\{\",t):\n if m.start()<pos:continue\n out.append(t[pos:m.end()])\n i=m.end();d=1;s=False;c=False\n while i<len(t) and d>0:\n  ch=t[i]\n  if c:\n   if ch==\"\\n\":c=False\n  elif s:\n   if ch==\"\\\\\":i+=1\n   elif ch==\"\\\"\":s=False\n  else:\n   if t[i:i+2]==\"//\":c=True;i+=1\n   elif ch==\"\\\"\":s=True\n   elif ch==\"{\":d+=1\n   elif ch==\"}\":d-=1\n  i+=1\n blk=re.sub(r\"\\bcheck_elf_files\\s*:\\s*true\\b\",\"check_elf_files: false\",t[m.end():i-1])\n if not re.search(r\"\\bcheck_elf_files\\s*:\",blk):blk=\"\\n    check_elf_files: false,\"+blk;patched+=1\n out.append(blk+\"}\");pos=i\nout.append(t[pos:])\nopen(p,\"w\",encoding=\"utf-8\").write(\"\".join(out))\nprint(\"Patched modules:\",patched)")'
 
       - name: Compile LineageOS
         env:
@@ -242,6 +241,17 @@ jobs:
 
           find out/soong/.intermediates out/target -mindepth 1 -exec touch -h {} + 2>/dev/null || true
 
+          # Keep linux_glibc host tools/libs as real local files so ELF $ORIGIN/../lib64 RPATH resolves
+          find out/soong/.intermediates -path '*/linux_glibc_*/*' -type l 2>/dev/null | sed 's|^|./|' > /tmp/host_links.txt || true
+          if [ -s /tmp/host_links.txt ]; then
+            echo "=== Materializing $(wc -l < /tmp/host_links.txt) linux_glibc host artifacts on local NVMe ==="
+            xargs -a /tmp/host_links.txt rm -f
+            ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
+              "${R_USER}@${R_HOST}" \
+              "cd '${REMOTE_PATH}/offload' && find out/soong/.intermediates -path '*/linux_glibc_*/*' -type f 2>/dev/null | tar -cf - -T -" \
+              | tar -xf - 2>/dev/null || true
+          fi
+
           HANDOFF_FLAG="/tmp/handoff_triggered"
           rm -f "$HANDOFF_FLAG"
 
@@ -259,7 +269,7 @@ jobs:
             local FORCE_LOW=${1:-0}
             [ -f "$HANDOFF_FLAG" ] && return 0
 
-            find out/soong/.intermediates out/target -type f ! -type l -size +256k -mmin +1 ! -name 'lineage-*.zip' ! -name '*.img' -printf '%s\t%p\n' 2>/dev/null > /tmp/offload_sized.txt || true
+            find out/soong/.intermediates out/target -type f ! -type l ! -path '*/linux_glibc_*/*' -size +256k -mmin +1 ! -name 'lineage-*.zip' ! -name '*.img' -printf '%s\t%p\n' 2>/dev/null > /tmp/offload_sized.txt || true
 
             local PENDING_BYTES=$(awk -F'\t' '{s+=$1} END {print s+0}' /tmp/offload_sized.txt)
             local PENDING_GB=$(awk "BEGIN {printf \"%.2f\", $PENDING_BYTES / 1073741824}")
@@ -303,6 +313,7 @@ jobs:
           echo "=== Space Before Build (Runner Root vs Mounted Android Storage) ==="
           df -h / /mnt/remote_out
 
+          export LD_LIBRARY_PATH="$PWD/out/host/linux-x86/lib64:$PWD/out/host/linux-x86/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           JOB_START_EPOCH=$(date +%s)
           BUILD_LOG="$TMPDIR/build.log"
           mka bacon -j6 > "$BUILD_LOG" 2>&1 &

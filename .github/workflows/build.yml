@@ -47,10 +47,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 sshfs
-
           git config --global user.name "GitHub Action Builder"
           git config --global user.email "actions@github.com"
-
           mkdir -p ~/bin
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
           chmod a+x ~/bin/repo
@@ -73,29 +71,7 @@ jobs:
           REMOTE_SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh workspace
-          python3 - << 'EOF'
-          import base64, os, re
-
-          raw = os.environ.get("REMOTE_SSH_KEY", "").strip()
-          if not raw:
-              raise SystemExit("ERROR: REMOTE_SSH_KEY secret is empty")
-
-          if "BEGIN OPENSSH PRIVATE KEY" in raw:
-              body = re.sub(r"-----BEGIN OPENSSH PRIVATE KEY-----|-----END OPENSSH PRIVATE KEY-----", "", raw)
-              b64_clean = "".join(body.split())
-              lines = [b64_clean[i:i+70] for i in range(0, len(b64_clean), 70)]
-              data = ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + "\n".join(lines) + "\n-----END OPENSSH PRIVATE KEY-----\n").encode("utf-8")
-          else:
-              b64_clean = "".join(raw.split())
-              b64_clean += "=" * ((4 - len(b64_clean) % 4) % 4)
-              data = base64.b64decode(b64_clean)
-
-          key_path = os.path.expanduser("~/.ssh/id_ed25519")
-          with open(key_path, "wb") as f:
-              f.write(data)
-          os.chmod(key_path, 0o600)
-          print(f"Wrote {len(data)} bytes to {key_path}")
-          EOF
+          python3 -c 'import base64, os, re; raw = os.environ.get("REMOTE_SSH_KEY", "").strip(); assert raw, "REMOTE_SSH_KEY is empty"; body = re.sub(r"-----BEGIN OPENSSH PRIVATE KEY-----|-----END OPENSSH PRIVATE KEY-----", "", raw); b64 = "".join(body.split()); b64 += "=" * ((4 - len(b64) % 4) % 4) if "BEGIN OPENSSH" not in raw else ""; data = ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + "\n".join(b64[i:i+70] for i in range(0, len(b64), 70)) + "\n-----END OPENSSH PRIVATE KEY-----\n").encode() if "BEGIN OPENSSH" in raw else base64.b64decode(b64); p = os.path.expanduser("~/.ssh/id_ed25519"); open(p, "wb").write(data); os.chmod(p, 0o600); print(f"Wrote {len(data)} bytes to {p}")'
           ssh-keygen -y -f "$HOME/.ssh/id_ed25519" > /dev/null
 
       - name: Mount Android Termux Storage for Heavy Artifacts
@@ -158,72 +134,7 @@ jobs:
         run: |
           cd workspace
           ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
-
-          python3 - << 'EOF'
-          import os, re, subprocess
-
-          bp_path = "vendor/tcl/Freyr_10_1_WiFi/Android.bp"
-          vendor_dir = os.path.dirname(bp_path)
-
-          if not os.path.exists(bp_path):
-              raise SystemExit(f"ERROR: {bp_path} not found")
-
-          # Report all DT_SONAME mismatches across proprietary vendor .so files
-          for root, _, files in os.walk(vendor_dir):
-              for fn in sorted(files):
-                  if fn.endswith(".so"):
-                      full = os.path.join(root, fn)
-                      out = subprocess.run(["readelf", "-d", full], capture_output=True, text=True).stdout
-                      m = re.search(r"\(SONAME\)\s+Library soname:\s+\[([^\]]+)\]", out)
-                      if m and m.group(1) != fn:
-                          print(f"Detected DT_SONAME mismatch: {fn} -> {m.group(1)}")
-
-          with open(bp_path, "r", encoding="utf-8") as f:
-              text = f.read()
-
-          # Automatically inject check_elf_files: false into all cc_prebuilt_library_shared blocks
-          out_parts = []
-          pos = 0
-          patched_count = 0
-          pattern = re.compile(r"\bcc_prebuilt_library_shared\s*\{")
-
-          while True:
-              match = pattern.search(text, pos)
-              if not match:
-                  out_parts.append(text[pos:])
-                  break
-
-              out_parts.append(text[pos:match.end()])
-              depth = 1
-              i = match.end()
-              in_comment = False
-              while i < len(text) and depth > 0:
-                  if in_comment:
-                      if text[i] == "\n":
-                          in_comment = False
-                  else:
-                      if text[i:i+2] == "//":
-                          in_comment = True
-                          i += 1
-                      elif text[i] == "{":
-                          depth += 1
-                      elif text[i] == "}":
-                          depth -= 1
-                  i += 1
-
-              block = text[match.end():i - 1]
-              if "check_elf_files:" not in block:
-                  block = "\n    check_elf_files: false," + block
-                  patched_count += 1
-
-              out_parts.append(block + "}")
-              pos = i
-
-          with open(bp_path, "w", encoding="utf-8") as f:
-              f.write("".join(out_parts))
-
-          print(f"=== Patched {patched_count} cc_prebuilt_library_shared modules in {bp_path} ===")
-          EOF
+          python3 -c 'import re; p="vendor/tcl/Freyr_10_1_WiFi/Android.bp"; t=open(p).read(); t2=re.sub(r"(cc_prebuilt_library_shared\s*\{)(?![^}]*check_elf_files:)", r"\1\n    check_elf_files: false,", t); open(p,"w").write(t2); print("Patched modules:", t2.count("check_elf_files: false"))'
 
       - name: Compile LineageOS
         env:
@@ -322,27 +233,12 @@ jobs:
               | tar -xzf - 2>/dev/null || true
           fi
 
-          echo "=== Linking previously offloaded artifacts from 110GB drive ==="
+          echo "=== Linking previously offloaded artifacts from Android device ==="
           ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
             "${R_USER}@${R_HOST}" \
             "mkdir -p '${REMOTE_PATH}/offload' && cd '${REMOTE_PATH}/offload' && find out -type f ! -name '*.tmp' 2>/dev/null || true" \
-            | python3 - << 'EOF'
-          import os, sys
+            | python3 -c 'import os,sys; paths=[l.strip() for l in sys.stdin if l.strip()]; [os.makedirs(os.path.dirname(r),exist_ok=True) or os.symlink(f"/mnt/remote_out/offload/{r}",r) for r in paths if not os.path.lexists(r)]; print(f"Linked {len(paths)} cached artifacts")'
 
-          linked = 0
-          for line in sys.stdin:
-              rel_path = line.strip()
-              if not rel_path:
-                  continue
-              remote_file = os.path.join("/mnt/remote_out/offload", rel_path)
-              if not os.path.lexists(rel_path):
-                  os.makedirs(os.path.dirname(rel_path), exist_ok=True)
-                  os.symlink(remote_file, rel_path)
-                  linked += 1
-          print(f"Linked {linked} cached artifacts from external drive")
-          EOF
-
-          # Refresh timestamps so fresh repo sync mtimes do not invalidate cached outputs
           find out/soong/.intermediates out/target -mindepth 1 -exec touch -h {} + 2>/dev/null || true
 
           HANDOFF_FLAG="/tmp/handoff_triggered"
@@ -355,7 +251,7 @@ jobs:
               | ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
                 "${R_USER}@${R_HOST}" \
                 "cat > '${REMOTE_PATH}/ninja_state/small_cache.tar.gz.tmp' && mv -f '${REMOTE_PATH}/ninja_state/small_cache.tar.gz.tmp' '${REMOTE_PATH}/ninja_state/small_cache.tar.gz'" \
-              && echo "=== Updated small_cache.tar.gz on remote drive ===" || true
+              && echo "=== Updated small_cache.tar.gz on remote device ===" || true
           }
 
           offload_completed_artifacts() {
@@ -390,27 +286,7 @@ jobs:
                 -c aes128-gcm@openssh.com \
                 "${R_USER}@${R_HOST}" \
                 "mkdir -p '${REMOTE_DIR}' && tar -xf - -C '${REMOTE_DIR}'"; then
-
-                python3 - << 'EOF'
-          import os
-
-          replaced, total_bytes = 0, 0
-          with open("/tmp/offload_list.txt") as f:
-              for line in f:
-                  src = line.strip()
-                  if not src:
-                      continue
-                  dst = os.path.join("/mnt/remote_out/offload", src)
-                  try:
-                      if not os.path.islink(src):
-                          total_bytes += os.path.getsize(src)
-                          os.unlink(src)
-                          os.symlink(dst, src)
-                          replaced += 1
-                  except OSError:
-                      pass
-          print(f"=== Bulk-offloaded {replaced} files ({total_bytes / (1024**3):.2f} GB) ===")
-          EOF
+                python3 -c 'import os; files=[l.strip() for l in open("/tmp/offload_list.txt") if l.strip()]; sz=sum(os.path.getsize(s) for s in files if os.path.exists(s) and not os.path.islink(s)); [os.unlink(s) or os.symlink(f"/mnt/remote_out/offload/{s}",s) for s in files if os.path.exists(s) and not os.path.islink(s)]; print(f"=== Bulk-offloaded {len(files)} files ({sz/(1024**3):.2f} GB) ===")'
               else
                 echo "=== Bulk tar offload interrupted or failed; will retry next cycle ==="
               fi
@@ -423,7 +299,7 @@ jobs:
             cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
           }
 
-          echo "=== Space Before Build (Runner Root vs Mounted 110GB Drive) ==="
+          echo "=== Space Before Build (Runner Root vs Mounted Android Storage) ==="
           df -h / /mnt/remote_out
 
           JOB_START_EPOCH=$(date +%s)
@@ -432,7 +308,6 @@ jobs:
           BUILD_PID=$!
           LAST_BUCKET=0
 
-          # Independent 335-minute (20100s) watchdog — cannot be blocked by long tar/ssh offloads
           (
             while true; do
               sleep 30
@@ -477,4 +352,42 @@ jobs:
 
           if [ -f "$HANDOFF_FLAG" ]; then
             echo "=== Flushing Ninja state & small cache before chaining next run ==="
-            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null
+            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
+            save_small_cache_stream
+
+            echo "=== Dispatching continuation workflow run ==="
+            curl -fsSL -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
+              -d "{\"ref\":\"${{ github.ref_name }}\"}"
+
+            echo "=== Next workflow run queued successfully ==="
+            exit 0
+          fi
+
+          kill $WATCHDOG_TIMER_PID 2>/dev/null || true
+          BUILD_STATUS=0
+          wait $BUILD_PID || BUILD_STATUS=$?
+
+          offload_completed_artifacts 1
+
+          if [ $BUILD_STATUS -ne 0 ]; then
+            echo "=== BUILD FAILED (exit code $BUILD_STATUS) — ERROR CONTEXT ==="
+            grep -B 5 -A 30 'FAILED:' "$BUILD_LOG" | tail -n 120 || tail -n 100 "$BUILD_LOG"
+            exit 1
+          fi
+
+          save_small_cache_stream
+
+          echo "=== Copying Final Flashable ROM to Android Storage ==="
+          cp -f out/target/product/Freyr_10_1_WiFi/lineage-*.zip /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
+          cp -f out/target/product/Freyr_10_1_WiFi/*.img /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
+          ls -lh /mnt/remote_out/FINAL_ROM/
+
+      - name: Unmount Remote Drive
+        if: always()
+        run: |
+          fusermount -u /mnt/remote_out || true
+          

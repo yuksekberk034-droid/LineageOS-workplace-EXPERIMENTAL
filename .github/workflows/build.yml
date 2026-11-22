@@ -189,6 +189,7 @@ jobs:
             set -e
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
+            df -h /
 
             # Replace full .repo (~25-30 GB) with a minimal stub so gettop/build scripts still detect tree root
             rm -rf .repo

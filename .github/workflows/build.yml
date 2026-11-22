@@ -189,12 +189,14 @@ jobs:
             set -e
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
-            df -h /
 
-            # Replace full .repo (~25-30 GB) with a minimal stub so gettop/build scripts still detect tree root
+            # Snapshot the real pinned manifest before deleting .repo (~25-30 GB)
+            repo manifest -o /tmp/build-manifest-snapshot.xml -r
             rm -rf .repo
-            mkdir -p .repo/manifests
-            touch .repo/manifest.xml
+            mkdir -p .repo/manifests .repo/repo
+            cp /tmp/build-manifest-snapshot.xml .repo/manifest.xml
+            printf "#!/usr/bin/env python3\nimport sys\nif \"manifest\" in sys.argv[1:]:\n    sys.stdout.write(open(\"/tmp/build-manifest-snapshot.xml\").read())\n" > .repo/repo/repo
+            chmod +x .repo/repo/repo
 
             df -h / /mnt
             mka ${{ inputs.target }} -j"$(nproc)"

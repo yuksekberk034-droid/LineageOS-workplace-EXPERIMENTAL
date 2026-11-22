@@ -133,8 +133,30 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git device/tcl/Freyr_10_1_WiFi
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git vendor/tcl/Freyr_10_1_WiFi
 
-          # Verify product makefiles exist before running lunch
-          ls -la device/tcl/Freyr_10_1_WiFi/AndroidProducts.mk device/tcl/Freyr_10_1_WiFi/lineage_Freyr_10_1_WiFi.mk
+          DEV_DIR="device/tcl/${{ inputs.device }}"
+          echo "=== Contents of ${DEV_DIR} ==="
+          ls -la "$DEV_DIR"
+          cat "${DEV_DIR}/AndroidProducts.mk"
+
+          # Auto-adapt aospdtgen trees if lineage_${DEVICE}.mk is missing
+          if [ ! -f "${DEV_DIR}/lineage_${{ inputs.device }}.mk" ]; then
+            BASE_MK=$(ls "${DEV_DIR}"/*_${{ inputs.device }}.mk 2>/dev/null | head -n 1)
+            if [ -n "$BASE_MK" ]; then
+              echo "Converting $(basename "$BASE_MK") -> lineage_${{ inputs.device }}.mk..."
+              cp "$BASE_MK" "${DEV_DIR}/lineage_${{ inputs.device }}.mk"
+              sed -i 's|$(SRC_TARGET_DIR)/product/core_64_bit.mk|$(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)|g; s|vendor/aosp/config/common_full_phone.mk|vendor/lineage/config/common_full_tablet_wifionly.mk|g; s|vendor/aosp/config/common.mk|vendor/lineage/config/common_full_tablet_wifionly.mk|g' "${DEV_DIR}/lineage_${{ inputs.device }}.mk"
+              sed -i "s|PRODUCT_NAME := .*|PRODUCT_NAME := lineage_${{ inputs.device }}|g" "${DEV_DIR}/lineage_${{ inputs.device }}.mk"
+              cat << EOF > "${DEV_DIR}/AndroidProducts.mk"
+          PRODUCT_MAKEFILES := \\
+              \$(LOCAL_DIR)/lineage_${{ inputs.device }}.mk
+
+          COMMON_LUNCH_CHOICES := \\
+              lineage_${{ inputs.device }}-userdebug \\
+              lineage_${{ inputs.device }}-eng
+          EOF
+            fi
+          fi
+
           df -h / /mnt
 
       - name: Restore Build Checkpoint from Remote Server

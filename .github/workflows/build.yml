@@ -109,7 +109,9 @@ jobs:
           set -e
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          printf '%s\n' "$REMOTE_SSH_KEY" > ~/.ssh/id_ed25519
+          cat << 'EOF' > ~/.ssh/id_ed25519
+          ${{ secrets.REMOTE_SSH_KEY }}
+          EOF
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "$REMOTE_PORT" -H "$REMOTE_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
@@ -120,5 +122,84 @@ jobs:
           cd ~/android
 
           git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com
-          
+          git config --global user.email "actions@github.com"
+          git config --global color.ui false
+
+          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1 --git-lfs
+          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j"$(nproc)"
+
+          # Clone TCL Tab 10L Gen 2 (8492A / Freyr_10_1_WiFi) device and vendor trees
+          mkdir -p device/tcl vendor/tcl
+          git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git device/tcl/Freyr_10_1_WiFi
+          git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git vendor/tcl/Freyr_10_1_WiFi
+
+          # Verify product makefiles exist before running lunch
+          ls -la device/tcl/Freyr_10_1_WiFi/AndroidProducts.mk device/tcl/Freyr_10_1_WiFi/lineage_Freyr_10_1_WiFi.mk
+          df -h / /mnt
+
+      - name: Restore Build Checkpoint from Remote Server
+        if: inputs.resume_from_remote && env.REMOTE_HOST != ''
+        run: |
+          set -e
+          DEST="${REMOTE_USER}@${REMOTE_HOST}"
+
+          echo "Streaming checkpoint from ${DEST}:${REMOTE_OUT_DIR}/out_checkpoint.tar.zst..."
+          ssh -p "$REMOTE_PORT" "$DEST" "cat ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst" \
+            | zstd -d -T0 \
+            | tar -xf - -C /mnt/out
+
+      - name: Build LineageOS (With 4h55m Timeout Checkpointing)
+        run: |
+          set +e
+          cd ~/android
+          source build/envsetup.sh
+          lunch "lineage_${{ inputs.device }}-${{ inputs.build_type }}"
+
+          timeout --signal=TERM 295m mka ${{ inputs.target }} -j"$(nproc)"
+          BUILD_EXIT=$?
+          set -e
+
+          if [ "$BUILD_EXIT" -eq 0 ]; then
+            echo "Build completed successfully!"
+            exit 0
+          elif [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 143 ]; then
+            echo "Build reached 4h55m safety limit. Streaming /mnt/out checkpoint to remote server..."
+            if [ -n "$REMOTE_HOST" ]; then
+              DEST="${REMOTE_USER}@${REMOTE_HOST}"
+              ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}"
+              tar -cf - -C /mnt/out . \
+                | zstd -3 -T0 \
+                | ssh -p "$REMOTE_PORT" "$DEST" "cat > ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst"
+              echo "Checkpoint saved. Re-run this workflow with resume_from_remote=true to finish."
+            fi
+            exit 1
+          else
+            echo "Build failed with exit code $BUILD_EXIT"
+            exit "$BUILD_EXIT"
+          fi
+
+      - name: Upload Finished Artifacts to Remote Server
+        if: success() && env.REMOTE_HOST != ''
+        run: |
+          set -e
+          DEST="${REMOTE_USER}@${REMOTE_HOST}"
+          RELEASE_DIR="${REMOTE_OUT_DIR}/releases/${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
+          PRODUCT_OUT="/mnt/out/target/product/${{ inputs.device }}"
+
+          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${RELEASE_DIR}"
+          for f in "$PRODUCT_OUT"/lineage-*.zip "$PRODUCT_OUT"/*.img; do
+            [ -f "$f" ] && scp -P "$REMOTE_PORT" "$f" "${DEST}:${RELEASE_DIR}/"
+          done
+
+      - name: Upload GitHub Release Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-20-${{ inputs.device }}
+          if-no-files-found: warn
+          path: |
+            /mnt/out/target/product/${{ inputs.device }}/lineage-*.zip
+            /mnt/out/target/product/${{ inputs.device }}/boot.img
+            /mnt/out/target/product/${{ inputs.device }}/system.img
+            /mnt/out/target/product/${{ inputs.device }}/vendor.img
+            /mnt/out/target/product/${{ inputs.device }}/recovery.img

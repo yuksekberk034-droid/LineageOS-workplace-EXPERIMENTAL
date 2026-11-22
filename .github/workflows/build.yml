@@ -102,7 +102,7 @@ jobs:
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/.bin/repo
           chmod a+x ~/.bin/repo
           echo "$HOME/.bin" >> "$GITHUB_PATH"
-         df -h /
+          df -h /
 
 
       - name: Connect Tailscale
@@ -122,7 +122,7 @@ jobs:
           EOF
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "$REMOTE_PORT" -H "$REMOTE_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
-         df -h /
+          df -h /
 
 
       - name: Sync LineageOS Source & Clone Device/Vendor Trees

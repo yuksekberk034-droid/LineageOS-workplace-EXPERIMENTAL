@@ -68,7 +68,7 @@ jobs:
           set -e
           sudo systemctl stop systemd-oomd docker docker.socket containerd snapd || true
 
-          # Load zram kernel module BEFORE removing any system packages
+          # Configure 10 GB ZRAM before purging packages
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
           sudo modprobe zram
@@ -76,7 +76,7 @@ jobs:
           sudo mkswap /dev/zram0
           sudo swapon -p 100 /dev/zram0
 
-          # Purge heavy pre-installed Ubuntu packages not needed for AOSP/LineageOS
+          # Purge heavy pre-installed Ubuntu packages not needed for AOSP/LineageOS (~25 GB freed)
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
             'temurin-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \
             'azure-cli' 'google-cloud-cli' 'powershell' 'dotnet*' 'mono-*' \
@@ -112,7 +112,7 @@ jobs:
             /usr/share/doc/* \
             /usr/share/man/*
 
-          # Add 4 GB /mnt/swapfile (total 14 GB swap) and place fixed-size host + target/common on /mnt
+          # Add 4 GB /mnt/swapfile (14 GB total swap) and put fixed-size host + target/common on /mnt
           sudo fallocate -l 4G /mnt/swapfile
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
@@ -219,33 +219,44 @@ jobs:
             | zstd -d -T0 \
             | tar -xPf -
 
-      - name: Build LineageOS (Strip .git/.repo + Fast Build Flags + Checkpointing)
+      - name: Build LineageOS (Strip .git/.repo + Atomic Cold-Offload + Checkpointing)
         run: |
           set +e
           cd ~/android
 
-          # Emergency cold-offloader: only triggers if / drops under 12 GB free
+          # Atomic background cold-offloader: only triggers if / drops below 14 GB free.
+          # Stages full copy first before swapping symlink so files never vanish mid-compile.
           (
             while true; do
               sleep 45
               ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-              if [ "$ROOT_FREE_GB" -lt 12 ] && mountpoint -q /tmp/remote_out; then
+              if [ "$ROOT_FREE_GB" -lt 14 ] && mountpoint -q /tmp/remote_out; then
                 INTER_ROOT="/home/runner/out/soong/.intermediates"
                 if [ -d "$INTER_ROOT" ]; then
-                  for grp in external prebuilts frameworks hardware packages system vendor art libcore dalvik tools; do
+                  for grp in prebuilts frameworks hardware packages system vendor art libcore dalvik tools external; do
                     [ -d "$INTER_ROOT/$grp" ] || continue
                     for sub in "$INTER_ROOT/$grp"/*; do
                       [ -d "$sub" ] && [ ! -L "$sub" ] || continue
-                      if [ -z "$(find "$sub" -mmin -8 2>/dev/null | head -n 1)" ]; then
+                      case "$(basename "$sub")" in
+                        clang|llvm) continue ;;
+                      esac
+                      if [ -z "$(find "$sub" -mmin -10 2>/dev/null | head -n 1)" ]; then
                         REL="${sub#$INTER_ROOT/}"
-                        mkdir -p "/tmp/remote_out/soong_inter/$REL"
-                        if rsync -a --remove-source-files "$sub/" "/tmp/remote_out/soong_inter/$REL/" 2>/dev/null; then
-                          rm -rf "$sub"
-                          ln -s "/tmp/remote_out/soong_inter/$REL" "$sub"
-                          echo "[Cold-Offload] Moved $REL -> remote (Root free: $(df -BG / | awk 'NR==2 {print $4}'))"
+                        DEST_DIR="/tmp/remote_out/soong_inter/$REL"
+                        STAGE_DIR="${DEST_DIR}.stage"
+                        mkdir -p "$(dirname "$DEST_DIR")"
+                        rm -rf "$STAGE_DIR" "$DEST_DIR"
+                        if cp -a "$sub" "$STAGE_DIR" 2>/dev/null; then
+                          mv "$STAGE_DIR" "$DEST_DIR"
+                          mv "$sub" "${sub}.old"
+                          ln -s "$DEST_DIR" "$sub"
+                          rm -rf "${sub}.old"
+                          echo "[Cold-Offload] Atomically moved $REL -> remote (Root free: $(df -BG / | awk 'NR==2 {print $4}'))"
+                        else
+                          rm -rf "$STAGE_DIR"
                         fi
                         ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-                        [ "$ROOT_FREE_GB" -ge 18 ] && break 2
+                        [ "$ROOT_FREE_GB" -ge 20 ] && break 2
                       fi
                     done
                   done
@@ -260,9 +271,9 @@ jobs:
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
 
-            # Snapshot pinned manifest, then delete .repo, non-kernel .git dirs, and macOS prebuilts (~45-50 GB freed)
+            # Snapshot pinned manifest, then delete .repo and non-kernel .git dirs (~40 GB freed)
             repo manifest -o /tmp/build-manifest-snapshot.xml -r
-            rm -rf .repo prebuilts/*/darwin-x86 prebuilts/*/*/darwin-x86
+            rm -rf .repo
             find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
 
             mkdir -p .repo/manifests .repo/repo

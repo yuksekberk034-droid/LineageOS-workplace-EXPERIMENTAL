@@ -122,20 +122,21 @@ jobs:
           set -e
           mkdir -p ~/.ssh /tmp/remote_out
           chmod 700 ~/.ssh
-          cat << 'EOF' > ~/.ssh/id_ed25519
-          ${{ secrets.REMOTE_SSH_KEY }}
-          EOF
+          printenv REMOTE_SSH_KEY | tr -d '\r' > ~/.ssh/id_ed25519
+          # Ensure trailing newline exists (required by OpenSSH libcrypto)
+          [ -n "$(tail -c 1 ~/.ssh/id_ed25519)" ] && echo "" >> ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+
           ssh-keyscan -p "$REMOTE_PORT" -H "$REMOTE_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
           DEST="${REMOTE_USER}@${REMOTE_HOST}"
-          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/symbols"
-          sshfs -p "$REMOTE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,compression=no \
+          ssh -i ~/.ssh/id_ed25519 -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/symbols"
+          sshfs -p "$REMOTE_PORT" -o IdentityFile=~/.ssh/id_ed25519,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,compression=no \
             "${DEST}:${REMOTE_OUT_DIR}/cold_offload" /tmp/remote_out
 
           mkdir -p "/home/runner/out/target/product/${{ inputs.device }}"
           ln -sfn /tmp/remote_out/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
-
+          
       - name: Sync LineageOS Source & Clone Device/Vendor Trees
         run: |
           set -e

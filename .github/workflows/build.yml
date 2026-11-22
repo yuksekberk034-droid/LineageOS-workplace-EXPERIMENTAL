@@ -39,7 +39,7 @@ on:
 env:
   MANIFEST_URL: "https://github.com/LineageOS/android.git"
   MANIFEST_BRANCH: "lineage-20.0"
-  OUT_DIR: "/mnt/out"
+  OUT_DIR: "/home/runner/out"
   USE_CCACHE: "0"
   WITH_TIDY: "false"
   SKIP_ABI_CHECKS: "true"
@@ -57,7 +57,7 @@ jobs:
       REMOTE_SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
 
     steps:
-      - name: Free Disk Space & Configure ZRAM + /mnt/out
+      - name: Free Disk Space & Configure ZRAM + Storage
         run: |
           set -e
           sudo rm -rf \
@@ -65,8 +65,11 @@ jobs:
             /usr/local/lib/android \
             /opt/ghc \
             /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost
+            /usr/local/share/boost \
+            /usr/local/share/chromium \
+            /usr/local/lib/node_modules
 
+          # Remove swapfile on /mnt and use 12 GB in-memory ZRAM
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
 
@@ -75,12 +78,16 @@ jobs:
           sudo mkswap /dev/zram0
           sudo swapon -p 100 /dev/zram0
 
-          sudo mkdir -p /mnt/out
-          sudo chown -R "$USER:$USER" /mnt/out
+          # Pool /home/runner/out (~80 GB free after .repo cleanup) + /mnt/out_ext (~14 GB free)
+          mkdir -p /home/runner/out/soong /home/runner/out/target
+          sudo mkdir -p /mnt/out_ext/soong_inter /mnt/out_ext/common_obj
+          sudo chown -R "$USER:$USER" /mnt/out_ext
+
+          ln -sfn /mnt/out_ext/soong_inter /home/runner/out/soong/.intermediates
+          ln -sfn /mnt/out_ext/common_obj /home/runner/out/target/common
 
           df -h / /mnt
           free -h
-          df -h /
 
       - name: Install Build Dependencies
         run: |
@@ -91,7 +98,7 @@ jobs:
             git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev \
             lib32z1-dev lz4 libncurses6 libncurses-dev libsdl1.2-dev \
             libssl-dev libxml2-dev libxml2-utils lzop pngcrush rsync schedtool \
-            squashfs-tools xsltproc zip zlib1g-dev python-is-python3 zstd
+            squashfs-tools xsltproc zip zlib1g-dev python-is-python3 zstd sshfs
 
           if [ ! -e /usr/lib/x86_64-linux-gnu/libncurses.so.5 ] && [ -e /usr/lib/x86_64-linux-gnu/libncurses.so.6 ]; then
             sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
@@ -102,8 +109,6 @@ jobs:
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/.bin/repo
           chmod a+x ~/.bin/repo
           echo "$HOME/.bin" >> "$GITHUB_PATH"
-          df -h /
-
 
       - name: Connect Tailscale
         if: env.TS_AUTHKEY != ''
@@ -111,19 +116,25 @@ jobs:
         with:
           authkey: ${{ env.TS_AUTHKEY }}
 
-      - name: Setup Remote SSH Access
+      - name: Setup Remote SSH & Mount Symbols Cold-Storage
         if: env.REMOTE_SSH_KEY != '' && env.REMOTE_HOST != ''
         run: |
           set -e
-          mkdir -p ~/.ssh
+          mkdir -p ~/.ssh /tmp/remote_out
           chmod 700 ~/.ssh
           cat << 'EOF' > ~/.ssh/id_ed25519
           ${{ secrets.REMOTE_SSH_KEY }}
           EOF
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "$REMOTE_PORT" -H "$REMOTE_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
-          df -h /
 
+          DEST="${REMOTE_USER}@${REMOTE_HOST}"
+          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/symbols"
+          sshfs -p "$REMOTE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,compression=no \
+            "${DEST}:${REMOTE_OUT_DIR}/cold_offload" /tmp/remote_out
+
+          mkdir -p "/home/runner/out/target/product/${{ inputs.device }}"
+          ln -sfn /tmp/remote_out/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
 
       - name: Sync LineageOS Source & Clone Device/Vendor Trees
         run: |
@@ -138,14 +149,13 @@ jobs:
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1 --git-lfs
           repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j"$(nproc)"
 
-          # Clone into DEVICE_PATH (device/tcl/Freyr_10_1_WiFi) and vendor/tcl/Freyr_10_1_WiFi
           mkdir -p device/tcl vendor/tcl
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          ls -la "device/tcl/${{ inputs.device }}/AndroidProducts.mk" "device/tcl/${{ inputs.device }}/lineage_${{ inputs.product }}.mk"
           df -h / /mnt
-
+          df -h /
+          
       - name: Restore Build Checkpoint from Remote Server
         if: inputs.resume_from_remote && env.REMOTE_HOST != ''
         run: |
@@ -155,16 +165,26 @@ jobs:
           echo "Streaming checkpoint from ${DEST}:${REMOTE_OUT_DIR}/out_checkpoint.tar.zst..."
           ssh -p "$REMOTE_PORT" "$DEST" "cat ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst" \
             | zstd -d -T0 \
-            | tar -xf - -C /mnt/out
+            | tar -xPf -
 
-      - name: Build LineageOS (With 4h55m Timeout Checkpointing)
+      - name: Build LineageOS (Clean .repo After Lunch + 4h55m Checkpointing)
         run: |
           set +e
           cd ~/android
+
           timeout --signal=TERM 295m bash -c '
             set -e
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
+            df -h /
+
+            # Replace full .repo (~25-30 GB) with a minimal stub so gettop/build scripts still detect tree root
+            rm -rf .repo
+            mkdir -p .repo/manifests
+            touch .repo/manifest.xml
+            df 
+
+            df -h / /mnt
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?
@@ -173,45 +193,10 @@ jobs:
           if [ "$BUILD_EXIT" -eq 0 ]; then
             echo "Build completed successfully!"
             exit 0
-          elif [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 143 ]; then
-            echo "Build reached 4h55m safety limit. Streaming /mnt/out checkpoint to remote server..."
+          elif [ "$BUILD_EXIT" -eq 124 ] \vert{}\vert{} [ "$BUILD_EXIT" -eq 143 ]; then
+            echo "Build reached 4h55m safety limit. Streaming checkpoint to remote server..."
             if [ -n "$REMOTE_HOST" ]; then
               DEST="${REMOTE_USER}@${REMOTE_HOST}"
               ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}"
-              tar -cf - -C /mnt/out . \
-                | zstd -3 -T0 \
-                | ssh -p "$REMOTE_PORT" "$DEST" "cat > ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst"
-              echo "Checkpoint saved. Re-run this workflow with resume_from_remote=true to finish."
-            fi
-            exit 1
-          else
-            echo "Build failed with exit code $BUILD_EXIT"
-            exit "$BUILD_EXIT"
-          fi
-
-
-      - name: Upload Finished Artifacts to Remote Server
-        if: success() && env.REMOTE_HOST != ''
-        run: |
-          set -e
-          DEST="${REMOTE_USER}@${REMOTE_HOST}"
-          RELEASE_DIR="${REMOTE_OUT_DIR}/releases/${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
-          PRODUCT_OUT="/mnt/out/target/product/${{ inputs.device }}"
-
-          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${RELEASE_DIR}"
-          for f in "$PRODUCT_OUT"/lineage-*.zip "$PRODUCT_OUT"/*.img; do
-            [ -f "$f" ] && scp -P "$REMOTE_PORT" "$f" "${DEST}:${RELEASE_DIR}/"
-          done
-
-      - name: Upload GitHub Release Artifacts
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lineage-20-${{ inputs.device }}
-          if-no-files-found: warn
-          path: |
-            /mnt/out/target/product/${{ inputs.device }}/lineage-*.zip
-            /mnt/out/target/product/${{ inputs.device }}/boot.img
-            /mnt/out/target/product/${{ inputs.device }}/system.img
-            /mnt/out/target/product/${{ inputs.device }}/vendor.img
-            /mnt/out/target/product/${{ inputs.device }}/recovery.img
+              tar -cPf - /home/runner/out /
+              

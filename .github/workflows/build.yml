@@ -62,34 +62,50 @@ jobs:
       - name: Free Disk Space & Configure ZRAM + Storage
         run: |
           set -e
-          # Disable Ubuntu 24.04 systemd-oomd so soong_build is not killed with SIGTERM
-          sudo systemctl stop systemd-oomd || true
+          sudo systemctl stop systemd-oomd docker docker.socket containerd || true
 
           sudo rm -rf \
+            /var/lib/docker \
             /usr/share/dotnet \
             /usr/local/lib/android \
             /opt/ghc \
-            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache \
+            /opt/az \
+            /usr/share/miniconda \
+            /usr/share/swift \
+            /usr/share/rustup \
+            /usr/local/cargo \
+            /usr/local/.ghcup \
             /usr/local/share/boost \
             /usr/local/share/chromium \
-            /usr/local/lib/node_modules
+            /usr/local/share/powershell \
+            /usr/local/share/vcpkg \
+            /usr/local/lib/node_modules \
+            /usr/local/aws-cli \
+            /usr/local/aws-sam-cli \
+            /usr/local/julia*
 
-          # Remove swapfile on /mnt and configure 8 GB ZRAM
+          # 10 GB ZRAM + 4 GB /mnt/swapfile = 14 GB swap (30 GB total virtual RAM)
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
 
           sudo modprobe zram
-          sudo zramctl /dev/zram0 --algorithm zstd --size 8G
+          sudo zramctl /dev/zram0 --algorithm zstd --size 10G
           sudo mkswap /dev/zram0
           sudo swapon -p 100 /dev/zram0
 
-          # Pool /home/runner/out (~80 GB free after .repo cleanup) + /mnt/out_ext (~14 GB free)
-          mkdir -p /home/runner/out/soong /home/runner/out/target
-          sudo mkdir -p /mnt/out_ext/soong_inter /mnt/out_ext/common_obj
-          sudo chown -R "$USER:$USER" /mnt/out_ext
+          sudo fallocate -l 4G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon -p 50 /mnt/swapfile
 
-          ln -sfn /mnt/out_ext/soong_inter /home/runner/out/soong/.intermediates
-          ln -sfn /mnt/out_ext/common_obj /home/runner/out/target/common
+          # Put fixed-size host (~3.5 GB) + target/common (~4.5 GB) on remaining ~10 GB of /mnt
+          # Keeps /mnt safely under 12 GB/14 GB and saves ~8 GB on /
+          mkdir -p /home/runner/out/soong /home/runner/out/target
+          sudo mkdir -p /mnt/out_ext/host /mnt/out_ext/common
+          sudo chown -R "$USER:$USER" /mnt/out_ext
+          ln -sfn /mnt/out_ext/host /home/runner/out/host
+          ln -sfn /mnt/out_ext/common /home/runner/out/target/common
 
           df -h / /mnt
           free -h
@@ -104,6 +120,7 @@ jobs:
             lib32z1-dev liblz4-tool libncurses6 libncurses-dev libsdl1.2-dev \
             libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
             squashfs-tools xsltproc zip zlib1g-dev python-is-python3 zstd sshfs
+          sudo apt-get clean
 
           if [ ! -e /usr/lib/x86_64-linux-gnu/libncurses.so.5 ] && [ -e /usr/lib/x86_64-linux-gnu/libncurses.so.6 ]; then
             sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
@@ -121,7 +138,7 @@ jobs:
         with:
           authkey: ${{ env.TS_AUTHKEY }}
 
-      - name: Setup Remote SSH & Mount Symbols Cold-Storage
+      - name: Setup Remote SSH & Mount Cold-Storage
         if: env.REMOTE_SSH_KEY != '' && env.REMOTE_HOST != ''
         run: |
           set -e
@@ -147,7 +164,7 @@ jobs:
 
           sudo chmod 666 /dev/fuse 2>/dev/null || true
           DEST="${REMOTE_USER}@${REMOTE_HOST}"
-          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/symbols"
+          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/symbols ${REMOTE_OUT_DIR}/cold_offload/soong_inter"
           sshfs -p "$REMOTE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,compression=no \
             "${DEST}:${REMOTE_OUT_DIR}/cold_offload" /tmp/remote_out
 
@@ -184,10 +201,42 @@ jobs:
             | zstd -d -T0 \
             | tar -xPf -
 
-      - name: Build LineageOS (Clean .repo After Lunch + 4h55m Checkpointing)
+      - name: Build LineageOS (Clean .repo + Cold-Offload + 4h55m Checkpointing)
         run: |
           set +e
           cd ~/android
+
+          # Proactive background cold-offloader: whenever / drops below 22 GB free,
+          # moves idle .intermediates subtrees (untouched >5 min) to remote storage
+          (
+            while true; do
+              sleep 30
+              ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
+              if [ "$ROOT_FREE_GB" -lt 22 ] && mountpoint -q /tmp/remote_out; then
+                INTER_ROOT="/home/runner/out/soong/.intermediates"
+                if [ -d "$INTER_ROOT" ]; then
+                  for grp in external prebuilts frameworks hardware packages system vendor art libcore dalvik tools; do
+                    [ -d "$INTER_ROOT/$grp" ] || continue
+                    for sub in "$INTER_ROOT/$grp"/*; do
+                      [ -d "$sub" ] && [ ! -L "$sub" ] || continue
+                      if [ -z "$(find "$sub" -mmin -5 2>/dev/null | head -n 1)" ]; then
+                        REL="${sub#$INTER_ROOT/}"
+                        mkdir -p "/tmp/remote_out/soong_inter/$REL"
+                        if rsync -a --remove-source-files "$sub/" "/tmp/remote_out/soong_inter/$REL/" 2>/dev/null; then
+                          rm -rf "$sub"
+                          ln -s "/tmp/remote_out/soong_inter/$REL" "$sub"
+                          echo "[Cold-Offload] Moved $REL -> remote (Root free: $(df -BG / | awk 'NR==2 {print $4}'))"
+                        fi
+                        ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
+                        [ "$ROOT_FREE_GB" -ge 28 ] && break 2
+                      fi
+                    done
+                  done
+                fi
+              fi
+            done
+          ) &
+          OFFLOAD_PID=$!
 
           timeout --signal=TERM 295m bash -c '
             set -e
@@ -202,17 +251,12 @@ jobs:
             printf "#!/usr/bin/env python3\nimport sys\nif \"manifest\" in sys.argv[1:]:\n    sys.stdout.write(open(\"/tmp/build-manifest-snapshot.xml\").read())\n" > .repo/repo/repo
             chmod +x .repo/repo/repo
 
-            # Add 8 GB disk swap overflow on / (total: 16 GB RAM + 8 GB ZRAM + 8 GB swap)
-            sudo fallocate -l 8G /swapfile
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
-            sudo swapon -p 50 /swapfile
-
             df -h / /mnt
             free -h
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?
+          kill "$OFFLOAD_PID" 2>/dev/null || true
           set -e
 
           if [ "$BUILD_EXIT" -eq 0 ]; then

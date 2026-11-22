@@ -43,6 +43,8 @@ env:
   USE_CCACHE: "0"
   WITH_TIDY: "false"
   SKIP_ABI_CHECKS: "true"
+  GOGC: "40"
+  _JAVA_OPTIONS: "-Xmx6g"
   REMOTE_PORT: "8022"
   REMOTE_OUT_DIR: "lineage_out"
 
@@ -60,6 +62,9 @@ jobs:
       - name: Free Disk Space & Configure ZRAM + Storage
         run: |
           set -e
+          # Disable Ubuntu 24.04 systemd-oomd so soong_build is not killed with SIGTERM
+          sudo systemctl stop systemd-oomd || true
+
           sudo rm -rf \
             /usr/share/dotnet \
             /usr/local/lib/android \
@@ -69,12 +74,12 @@ jobs:
             /usr/local/share/chromium \
             /usr/local/lib/node_modules
 
-          # Remove swapfile on /mnt and use 12 GB in-memory ZRAM
+          # Remove swapfile on /mnt and configure 8 GB ZRAM
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
 
           sudo modprobe zram
-          sudo zramctl /dev/zram0 --algorithm zstd --size 12G
+          sudo zramctl /dev/zram0 --algorithm zstd --size 8G
           sudo mkswap /dev/zram0
           sudo swapon -p 100 /dev/zram0
 
@@ -130,7 +135,6 @@ jobs:
           fi
           chmod 600 ~/.ssh/id_remote
 
-          # Verify OpenSSH parses the decoded key cleanly before connecting
           ssh-keygen -y -f ~/.ssh/id_remote > /dev/null
 
           cat << 'EOF' > ~/.ssh/config
@@ -190,7 +194,7 @@ jobs:
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
 
-            # Snapshot the real pinned manifest before deleting .repo (~25-30 GB)
+            # Snapshot pinned manifest and delete .repo (~25-30 GB)
             repo manifest -o /tmp/build-manifest-snapshot.xml -r
             rm -rf .repo
             mkdir -p .repo/manifests .repo/repo
@@ -198,7 +202,14 @@ jobs:
             printf "#!/usr/bin/env python3\nimport sys\nif \"manifest\" in sys.argv[1:]:\n    sys.stdout.write(open(\"/tmp/build-manifest-snapshot.xml\").read())\n" > .repo/repo/repo
             chmod +x .repo/repo/repo
 
+            # Add 8 GB disk swap overflow on / (total: 16 GB RAM + 8 GB ZRAM + 8 GB swap)
+            sudo fallocate -l 8G /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon -p 50 /swapfile
+
             df -h / /mnt
+            free -h
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?
@@ -248,4 +259,3 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
-            

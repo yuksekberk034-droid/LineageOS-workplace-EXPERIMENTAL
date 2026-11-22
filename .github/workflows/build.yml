@@ -86,8 +86,8 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             bc bison build-essential curl flex g++-multilib gcc-multilib git \
             git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev \
-            lib32z1-dev liblz4-tool libncurses6 libncurses-dev libsdl1.2-dev \
-            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            lib32z1-dev lz4 libncurses6 libncurses-dev libsdl1.2-dev \
+            libssl-dev libxml2-dev libxml2-utils lzop pngcrush rsync schedtool \
             squashfs-tools xsltproc zip zlib1g-dev python-is-python3 zstd
 
           if [ ! -e /usr/lib/x86_64-linux-gnu/libncurses.so.5 ] && [ -e /usr/lib/x86_64-linux-gnu/libncurses.so.6 ]; then
@@ -99,6 +99,7 @@ jobs:
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/.bin/repo
           chmod a+x ~/.bin/repo
           echo "$HOME/.bin" >> "$GITHUB_PATH"
+          
 
       - name: Connect Tailscale
         if: env.TS_AUTHKEY != ''

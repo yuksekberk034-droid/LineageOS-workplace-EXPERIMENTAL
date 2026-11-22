@@ -44,7 +44,7 @@ env:
   WITH_TIDY: "false"
   SKIP_ABI_CHECKS: "true"
   REMOTE_PORT: "8022"
-  REMOTE_OUT_DIR: "~/lineage_out"
+  REMOTE_OUT_DIR: "lineage_out"
 
 jobs:
   build:
@@ -123,19 +123,25 @@ jobs:
           mkdir -p ~/.ssh /tmp/remote_out
           chmod 700 ~/.ssh
 
-          python3 -c 'import os; k=os.environ["REMOTE_SSH_KEY"].strip()+"\n"; open(os.path.expanduser("~/.ssh/id_remote"),"w").write(k)'
+          if printf '%s' "$REMOTE_SSH_KEY" | grep -q "BEGIN"; then
+            printf '%s\n' "$REMOTE_SSH_KEY" | tr -d '\r' > ~/.ssh/id_remote
+          else
+            printf '%s' "$REMOTE_SSH_KEY" | tr -d ' \n\r\t' | base64 -d > ~/.ssh/id_remote
+          fi
           chmod 600 ~/.ssh/id_remote
+
+          # Verify OpenSSH parses the decoded key cleanly before connecting
+          ssh-keygen -y -f ~/.ssh/id_remote > /dev/null
 
           cat << 'EOF' > ~/.ssh/config
           Host *
             IdentityFile ~/.ssh/id_remote
             StrictHostKeyChecking no
             UserKnownHostsFile /dev/null
-            PubkeyAcceptedAlgorithms +ssh-rsa
-            HostKeyAlgorithms +ssh-rsa
           EOF
           chmod 600 ~/.ssh/config
 
+          sudo chmod 666 /dev/fuse 2>/dev/null || true
           DEST="${REMOTE_USER}@${REMOTE_HOST}"
           ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/symbols"
           sshfs -p "$REMOTE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,compression=no \

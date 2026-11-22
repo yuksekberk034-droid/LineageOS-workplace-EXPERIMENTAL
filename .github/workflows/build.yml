@@ -52,9 +52,6 @@ jobs:
       REMOTE_SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
 
     steps:
-      - name: Checkout Workflow Repository
-        uses: actions/checkout@v4
-
       - name: Free Disk Space & Configure ZRAM + /mnt/out
         run: |
           set -e
@@ -99,7 +96,6 @@ jobs:
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/.bin/repo
           chmod a+x ~/.bin/repo
           echo "$HOME/.bin" >> "$GITHUB_PATH"
-          
 
       - name: Connect Tailscale
         if: env.TS_AUTHKEY != ''
@@ -117,90 +113,12 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "$REMOTE_PORT" -H "$REMOTE_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Sync LineageOS Source & Local Manifests
+      - name: Sync LineageOS Source & Clone Device/Vendor Trees
         run: |
           set -e
           mkdir -p ~/android
           cd ~/android
 
           git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git config --global color.ui false
-
-          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1 --git-lfs
-
-          # Copy local_manifests/*.xml if present in your workflow repo
-          if [ -d "$GITHUB_WORKSPACE/local_manifests" ]; then
-            mkdir -p .repo/local_manifests
-            cp -v "$GITHUB_WORKSPACE/local_manifests/"*.xml .repo/local_manifests/
-          fi
-
-          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j"$(nproc)"
-          df -h / /mnt
-
-      - name: Restore Build Checkpoint from Remote Server
-        if: inputs.resume_from_remote && env.REMOTE_HOST != ''
-        run: |
-          set -e
-          DEST="${REMOTE_USER}@${REMOTE_HOST}"
-
-          echo "Streaming checkpoint from ${DEST}:${REMOTE_OUT_DIR}/out_checkpoint.tar.zst..."
-          ssh -p "$REMOTE_PORT" "$DEST" "cat ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst" \
-            | zstd -d -T0 \
-            | tar -xf - -C /mnt/out
-
-      - name: Build LineageOS (With 4h55m Timeout Checkpointing)
-        run: |
-          set +e
-          cd ~/android
-          source build/envsetup.sh
-          lunch "lineage_${{ inputs.device }}-${{ inputs.build_type }}"
-
-          timeout --signal=TERM 295m mka ${{ inputs.target }} -j"$(nproc)"
-          BUILD_EXIT=$?
-          set -e
-
-          if [ "$BUILD_EXIT" -eq 0 ]; then
-            echo "Build completed successfully!"
-            exit 0
-          elif [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 143 ]; then
-            echo "Build reached 4h55m safety limit. Streaming /mnt/out checkpoint to remote server..."
-            if [ -n "$REMOTE_HOST" ]; then
-              DEST="${REMOTE_USER}@${REMOTE_HOST}"
-              ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}"
-              tar -cf - -C /mnt/out . \
-                | zstd -3 -T0 \
-                | ssh -p "$REMOTE_PORT" "$DEST" "cat > ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst"
-              echo "Checkpoint saved. Re-run this workflow with resume_from_remote=true to finish."
-            fi
-            exit 1
-          else
-            echo "Build failed with exit code $BUILD_EXIT"
-            exit "$BUILD_EXIT"
-          fi
-
-      - name: Upload Finished Artifacts to Remote Server
-        if: success() && env.REMOTE_HOST != ''
-        run: |
-          set -e
-          DEST="${REMOTE_USER}@${REMOTE_HOST}"
-          RELEASE_DIR="${REMOTE_OUT_DIR}/releases/${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
-          PRODUCT_OUT="/mnt/out/target/product/${{ inputs.device }}"
-
-          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${RELEASE_DIR}"
-          for f in "$PRODUCT_OUT"/lineage-*.zip "$PRODUCT_OUT"/*.img; do
-            [ -f "$f" ] && scp -P "$REMOTE_PORT" "$f" "${DEST}:${RELEASE_DIR}/"
-          done
-
-      - name: Upload GitHub Release Artifacts
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lineage-20-${{ inputs.device }}
-          if-no-files-found: warn
-          path: |
-            /mnt/out/target/product/${{ inputs.device }}/lineage-*.zip
-            /mnt/out/target/product/${{ inputs.device }}/boot.img
-            /mnt/out/target/product/${{ inputs.device }}/system.img
-            /mnt/out/target/product/${{ inputs.device }}/vendor.img
-            /mnt/out/target/product/${{ inputs.device }}/recovery.img
+          git config --global user.email "actions@github.com
+          

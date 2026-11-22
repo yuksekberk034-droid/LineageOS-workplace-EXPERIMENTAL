@@ -1,414 +1,211 @@
-name: Build LineageOS for TCL 8492A
+name: Build LineageOS 20.0
 
 on:
   workflow_dispatch:
+    inputs:
+      device:
+        description: "Device codename"
+        required: true
+        default: "Freyr_10_1_WiFi"
+        type: string
+      build_type:
+        description: "Build variant"
+        required: true
+        default: "userdebug"
+        type: choice
+        options:
+          - userdebug
+          - eng
+          - user
+      target:
+        description: "Make target (use partition images for bringup, bacon for full zip)"
+        required: true
+        default: "systemimage vendorimage bootimage"
+        type: choice
+        options:
+          - systemimage vendorimage bootimage
+          - bacon
+      resume_from_remote:
+        description: "Resume from a previous timeout checkpoint on remote server"
+        required: true
+        default: false
+        type: boolean
 
-concurrency:
-  group: local-drive-offload
-  cancel-in-progress: false
-
-permissions:
-  contents: read
-  actions: write
+env:
+  MANIFEST_URL: "https://github.com/LineageOS/android.git"
+  MANIFEST_BRANCH: "lineage-20.0"
+  OUT_DIR: "/mnt/out"
+  USE_CCACHE: "0"
+  WITH_TIDY: "false"
+  SKIP_ABI_CHECKS: "true"
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
 
     steps:
-      - name: Checkout Builder Repository
-        uses: actions/checkout@v4
-
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: false
-
-      - name: Set up Swap Space (12GB on /mnt)
+      - name: Free Disk Space & Configure ZRAM + /mnt/out
         run: |
+          set -e
+          # Reclaim ~30-35 GB on / by removing preinstalled SDKs/runtimes
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost
+
+          # Disable disk swap on /mnt so the full ~75 GB local NVMe is free for out/
           sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile /swapfile || true
-          sudo fallocate -l 12G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          swapon --show
-          free -h
+          sudo rm -f /mnt/swapfile
+
+          # Enable 12 GB compressed in-memory ZRAM swap (eliminates disk swap thrashing)
+          sudo modprobe zram
+          sudo zramctl /dev/zram0 --algorithm zstd --size 12G
+          sudo mkswap /dev/zram0
+          sudo swapon -p 100 /dev/zram0
+
+          # Prepare /mnt/out on local runner SSD
+          sudo mkdir -p /mnt/out
+          sudo chown -R "$USER:$USER" /mnt/out
+
           df -h / /mnt
+          free -h
 
-      - name: Install Build Dependencies & SSHFS
+      - name: Install Build Dependencies
         run: |
+          set -e
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 sshfs
-          git config --global user.name "GitHub Action Builder"
-          git config --global user.email "actions@github.com"
-          mkdir -p ~/bin
-          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
-          chmod a+x ~/bin/repo
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bc bison build-essential curl flex g++-multilib gcc-multilib git \
+            git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev \
+            lib32z1-dev liblz4-tool libncurses6 libncurses-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev python-is-python3 zstd
 
-      - name: Inject Legacy libncurses5 for Ubuntu 24.04
-        run: |
-          cd /tmp
-          wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2_amd64.deb
-          wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2_amd64.deb
-          sudo dpkg -i libtinfo5_6.3-2_amd64.deb libncurses5_6.3-2_amd64.deb
+          # Compatibility symlink for legacy AOSP prebuilts on Ubuntu 24.04
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libncurses.so.5 ] && [ -e /usr/lib/x86_64-linux-gnu/libncurses.so.6 ]; then
+            sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
+            sudo ln -s /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5
+          fi
 
-      - name: Connect to Tailscale
+          mkdir -p ~/.bin
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/.bin/repo
+          chmod a+x ~/.bin/repo
+          echo "$HOME/.bin" >> "$GITHUB_PATH"
+
+      - name: Connect Tailscale (Optional)
+        if: ${{ secrets.TAILSCALE_AUTHKEY != '' }}
         uses: tailscale/github-action@v2
         with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-          args: --accept-routes
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Write SSH Private Key
-        env:
-          REMOTE_SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
+      - name: Setup Remote SSH Access (Optional)
+        if: ${{ secrets.REMOTE_SSH_KEY != '' && secrets.REMOTE_HOST != '' }}
         run: |
-          mkdir -p ~/.ssh workspace
-          python3 -c 'import base64, os, re; raw = os.environ.get("REMOTE_SSH_KEY", "").strip(); assert raw, "REMOTE_SSH_KEY is empty"; body = re.sub(r"-----BEGIN OPENSSH PRIVATE KEY-----|-----END OPENSSH PRIVATE KEY-----", "", raw); b64 = "".join(body.split()); b64 += "=" * ((4 - len(b64) % 4) % 4) if "BEGIN OPENSSH" not in raw else ""; data = ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + "\n".join(b64[i:i+70] for i in range(0, len(b64), 70)) + "\n-----END OPENSSH PRIVATE KEY-----\n").encode() if "BEGIN OPENSSH" in raw else base64.b64decode(b64); p = os.path.expanduser("~/.ssh/id_ed25519"); open(p, "wb").write(data); os.chmod(p, 0o600); print(f"Wrote {len(data)} bytes to {p}")'
-          ssh-keygen -y -f "$HOME/.ssh/id_ed25519" > /dev/null
+          set -e
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.REMOTE_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          REMOTE_PORT="${{ secrets.REMOTE_PORT || '8022' }}"
+          ssh-keyscan -p "$REMOTE_PORT" -H "${{ secrets.REMOTE_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Mount Android Termux Storage for Heavy Artifacts
-        env:
-          REMOTE_USER: ${{ secrets.REMOTE_USER }}
-          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+      - name: Sync LineageOS Source & Local Manifests
         run: |
-          R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
-          R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
-          REMOTE_PATH="/data/data/com.termux/files/home/lineage_out"
+          set -e
+          mkdir -p ~/android
+          cd ~/android
 
-          sudo mkdir -p /mnt/remote_out
-          sudo chown -R "$USER:$USER" /mnt/remote_out
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global color.ui false
 
-          echo "=== Warming up Tailscale tunnel to $R_HOST ==="
-          tailscale status
-          tailscale ping --until-direct=false --timeout=30s --c=3 "$R_HOST" || true
+          # --depth=1 keeps total source + .repo footprint around ~60 GB instead of ~100 GB
+          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1 --git-lfs
 
-          echo "=== Verifying Termux SSH & Storage on Android ==="
-          SSH_READY=0
-          for i in 1 2 3 4 5; do
-            echo "SSH attempt $i/5 to ${R_HOST}:8022..."
-            if ssh -p 8022 -i "$HOME/.ssh/id_ed25519" \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              -o ConnectTimeout=30 \
-              -o ServerAliveInterval=15 \
-              "${R_USER}@${R_HOST}" \
-              "mkdir -p '$REMOTE_PATH' && df -h '$REMOTE_PATH'"; then
-              SSH_READY=1
-              break
-            fi
-            sleep 10
-          done
-          [ "$SSH_READY" -eq 1 ] || { echo "ERROR: Could not reach Termux sshd on port 8022 after 5 attempts"; exit 1; }
-
-          sshfs "${R_USER}@${R_HOST}:${REMOTE_PATH}" \
-            /mnt/remote_out \
-            -p 8022 \
-            -o IdentityFile="$HOME/.ssh/id_ed25519" \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o max_conns=6 \
-            -o TCPKeepAlive=yes \
-            -o ServerAliveInterval=15 \
-            -o ServerAliveCountMax=6 \
-            -o ConnectTimeout=45 \
-            -o reconnect \
-            -o cache=yes \
-            -o kernel_cache \
-            -o auto_cache \
-            -o entry_timeout=300 \
-            -o attr_timeout=300 \
-            -o ac_attr_timeout=300 \
-            -o negative_timeout=300 \
-            -o compression=yes \
-            -o Ciphers=aes128-gcm@openssh.com
-
-          echo "=== Mounted Remote Storage ==="
-          df -h /mnt/remote_out
-
-      - name: Initialize LineageOS Workspace
-        run: |
-          cd workspace
-          ~/bin/repo init -u https://github.com/LineageOS/android.git -b lineage-20.0 --depth=1 --no-clone-bundle
-          mkdir -p .repo/local_manifests
-          cp $GITHUB_WORKSPACE/.github/manifests/8492A.xml .repo/local_manifests/
-
-      - name: Sync Source Code & Patch Vendor ELF Checks
-        run: |
-          cd workspace
-          ~/bin/repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
-          python3 -c 'exec("import re\np=\"vendor/tcl/Freyr_10_1_WiFi/Android.bp\"\nt=open(p,encoding=\"utf-8\").read()\nout=[];pos=0;patched=0\nfor m in re.finditer(r\"\\bcc_prebuilt_library_shared\\s*\\{\",t):\n if m.start()<pos:continue\n out.append(t[pos:m.end()])\n i=m.end();d=1;s=False;c=False\n while i<len(t) and d>0:\n  ch=t[i]\n  if c:\n   if ch==\"\\n\":c=False\n  elif s:\n   if ch==\"\\\\\":i+=1\n   elif ch==\"\\\"\":s=False\n  else:\n   if t[i:i+2]==\"//\":c=True;i+=1\n   elif ch==\"\\\"\":s=True\n   elif ch==\"{\":d+=1\n   elif ch==\"}\":d-=1\n  i+=1\n blk=re.sub(r\"\\bcheck_elf_files\\s*:\\s*true\\b\",\"check_elf_files: false\",t[m.end():i-1])\n if not re.search(r\"\\bcheck_elf_files\\s*:\",blk):blk=\"\\n    check_elf_files: false,\"+blk;patched+=1\n out.append(blk+\"}\");pos=i\nout.append(t[pos:])\nopen(p,\"w\",encoding=\"utf-8\").write(\"\".join(out))\nprint(\"Patched modules:\",patched)")'
-
-      - name: Compile LineageOS
-        env:
-          REMOTE_USER: ${{ secrets.REMOTE_USER }}
-          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
-        run: |
-          cd workspace
-          export R_USER=$(printf '%s' "$REMOTE_USER" | tr -d '[:space:]')
-          export R_HOST=$(printf '%s' "$REMOTE_HOST" | tr -d '[:space:]')
-          export REMOTE_PATH="/data/data/com.termux/files/home/lineage_out"
-
-          MNT_AVAIL_GB=$(df -BG /mnt | awk 'NR==2 {gsub("G",""); print $4}')
-          if [ "${MNT_AVAIL_GB:-0}" -ge 8 ]; then
-            export TMPDIR="/mnt/tmp"
-          else
-            export TMPDIR="/tmp/lineage_tmp"
+          # Clone your device/vendor/kernel local_manifests if configured
+          if [ -n "${{ secrets.LOCAL_MANIFEST_URL }}" ]; then
+            mkdir -p .repo/local_manifests
+            git clone --depth=1 \
+              -b "${{ secrets.LOCAL_MANIFEST_BRANCH || 'lineage-20.0' }}" \
+              "${{ secrets.LOCAL_MANIFEST_URL }}" \
+              .repo/local_manifests
           fi
-          sudo mkdir -p "$TMPDIR" && sudo chown -R "$USER:$USER" "$TMPDIR"
-          echo "Using TMPDIR=$TMPDIR (free space: $(df -h "$TMPDIR" | awk 'NR==2 {print $4}'))"
 
-          export USE_CCACHE=0
-          export WITH_DEXPREOPT=false
-          export DONT_DEXPREOPT_PREBUILTS=true
-          export WITH_TIDY=false
-          export _JAVA_OPTIONS="-Xmx6g"
+          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j"$(nproc)"
+          df -h / /mnt
 
-          echo "=== Dropping page cache & tuning Go runtime before lunch ==="
-          sync
-          echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
-          export GOMAXPROCS=3
-          export SOONG_UI_LOG_LEVEL=INFO
+      - name: Restore Build Checkpoint from Remote Server
+        if: ${{ inputs.resume_from_remote && secrets.REMOTE_HOST != '' }}
+        run: |
+          set -e
+          REMOTE_PORT="${{ secrets.REMOTE_PORT || '8022' }}"
+          REMOTE_DEST="${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}"
+          REMOTE_DIR="${{ secrets.REMOTE_OUT_DIR || '~/lineage_out' }}"
 
-          echo "=== Running envsetup and lunch on local NVMe ==="
+          echo "Streaming checkpoint from ${REMOTE_DEST}:${REMOTE_DIR}/out_checkpoint.tar.zst..."
+          ssh -p "$REMOTE_PORT" "$REMOTE_DEST" "cat ${REMOTE_DIR}/out_checkpoint.tar.zst" \
+            | zstd -d -T0 \
+            | tar -xf - -C /mnt/out
+
+      - name: Build LineageOS (With 4h55m Timeout Checkpointing)
+        run: |
+          set +e
+          cd ~/android
           source build/envsetup.sh
+          lunch "lineage_${{ inputs.device }}-${{ inputs.build_type }}"
 
-          run_lunch_with_watchdog() {
-            local attempt=1
-            while [ $attempt -le 2 ]; do
-              echo "[$(date -u +%H:%M:%S)] Starting lunch attempt $attempt in foreground shell..."
-              rm -f /tmp/lunch_done
-              (
-                elapsed=0
-                while [ ! -f /tmp/lunch_done ]; do
-                  sleep 30
-                  elapsed=$((elapsed + 30))
-                  ACTIVE_PROC=$(ps -eo comm,pcpu,rss --sort=-pcpu | grep -E 'soong|ckati|go|find' | head -n 2 | tr '\n' '; ')
-                  echo "[$(date -u +%H:%M:%S)] lunch running (${elapsed}s) | Active: ${ACTIVE_PROC:-waiting}"
-                  if [ $elapsed -ge 720 ]; then
-                    echo "=== lunch stalled at ${elapsed}s — killing hung soong_ui/ckati ==="
-                    pkill -9 -f 'soong_ui|ckati' 2>/dev/null || true
-                    break
-                  fi
-                done
-              ) &
-              local WATCHDOG_PID=$!
+          # Stop cleanly at 295 minutes (4h55m) so there is ~55m left to stream a checkpoint if needed
+          timeout --signal=TERM 295m mka ${{ inputs.target }} -j"$(nproc)"
+          BUILD_EXIT=$?
+          set -e
 
-              if lunch lineage_8492A-userdebug; then
-                touch /tmp/lunch_done
-                kill $WATCHDOG_PID 2>/dev/null || true
-                echo "=== Verified TARGET_PRODUCT=${TARGET_PRODUCT} TARGET_BUILD_VARIANT=${TARGET_BUILD_VARIANT} ==="
-                return 0
-              fi
-
-              touch /tmp/lunch_done
-              kill $WATCHDOG_PID 2>/dev/null || true
-              rm -rf out/soong/.bootstrap out/.lock
-              attempt=$((attempt + 1))
-            done
-            echo "=== lunch failed after 2 attempts ==="
-            return 1
-          }
-
-          run_lunch_with_watchdog
-          unset GOMAXPROCS
-
-          rm -rf .repo
-          mkdir -p .repo/repo
-          printf '#!/usr/bin/env python3\nimport sys\nprint("<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>\\n<manifest></manifest>")\n' > .repo/repo/repo
-          chmod +x .repo/repo/repo
-
-          echo "=== Generating Ninja build graph on local NVMe ==="
-          mka nothing -j$(nproc --all)
-
-          mkdir -p /mnt/remote_out/offload/out /mnt/remote_out/ninja_state /mnt/remote_out/FINAL_ROM
-          cp -f /mnt/remote_out/ninja_state/.ninja_log out/.ninja_log 2>/dev/null || true
-          cp -f /mnt/remote_out/ninja_state/.ninja_deps out/.ninja_deps 2>/dev/null || true
-
-          SSH_CTL="/tmp/ssh_offload_ctl"
-          SSH_OPTS=(-p 8022 -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath="$SSH_CTL" -o ControlPersist=15m)
-
-          if [ -f /mnt/remote_out/ninja_state/small_cache.tar.gz ]; then
-            echo "=== Streaming small intermediates cache to local NVMe ==="
-            ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
-              "${R_USER}@${R_HOST}" \
-              "cat '${REMOTE_PATH}/ninja_state/small_cache.tar.gz'" \
-              | tar -xzf - 2>/dev/null || true
+          if [ "$BUILD_EXIT" -eq 0 ]; then
+            echo "Build completed successfully!"
+            exit 0
+          elif [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 143 ]; then
+            echo "Build reached 4h55m safety limit. Streaming /mnt/out checkpoint to remote server..."
+            if [ -n "${{ secrets.REMOTE_HOST }}" ]; then
+              REMOTE_PORT="${{ secrets.REMOTE_PORT || '8022' }}"
+              REMOTE_DEST="${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}"
+              REMOTE_DIR="${{ secrets.REMOTE_OUT_DIR || '~/lineage_out' }}"
+              ssh -p "$REMOTE_PORT" "$REMOTE_DEST" "mkdir -p ${REMOTE_DIR}"
+              tar -cf - -C /mnt/out . \
+                | zstd -3 -T0 \
+                | ssh -p "$REMOTE_PORT" "$REMOTE_DEST" "cat > ${REMOTE_DIR}/out_checkpoint.tar.zst"
+              echo "Checkpoint saved. Re-run this workflow with resume_from_remote=true to finish."
+            fi
+            exit 1
+          else
+            echo "Build failed with exit code $BUILD_EXIT"
+            exit "$BUILD_EXIT"
           fi
 
-          echo "=== Linking previously offloaded artifacts from Android device ==="
-          ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
-            "${R_USER}@${R_HOST}" \
-            "mkdir -p '${REMOTE_PATH}/offload' && cd '${REMOTE_PATH}/offload' && find out -type f ! -name '*.tmp' 2>/dev/null || true" \
-            | python3 -c 'import os,sys; paths=[l.strip() for l in sys.stdin if l.strip()]; [os.makedirs(os.path.dirname(r),exist_ok=True) or os.symlink(f"/mnt/remote_out/offload/{r}",r) for r in paths if not os.path.lexists(r)]; print(f"Linked {len(paths)} cached artifacts")'
+      - name: Upload Finished Artifacts to Remote Server
+        if: ${{ success() && secrets.REMOTE_HOST != '' }}
+        run: |
+          set -e
+          REMOTE_PORT="${{ secrets.REMOTE_PORT || '8022' }}"
+          REMOTE_DEST="${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}"
+          REMOTE_DIR="${{ secrets.REMOTE_OUT_DIR || '~/lineage_out' }}/releases/${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
+          PRODUCT_OUT="/mnt/out/target/product/${{ inputs.device }}"
 
-          find out/soong/.intermediates out/target -mindepth 1 -exec touch -h {} + 2>/dev/null || true
-
-          # Keep linux_glibc host tools/libs as real local files so ELF $ORIGIN/../lib64 RPATH resolves
-          find out/soong/.intermediates -path '*/linux_glibc_*/*' -type l 2>/dev/null | sed 's|^|./|' > /tmp/host_links.txt || true
-          if [ -s /tmp/host_links.txt ]; then
-            echo "=== Materializing $(wc -l < /tmp/host_links.txt) linux_glibc host artifacts on local NVMe ==="
-            xargs -a /tmp/host_links.txt rm -f
-            ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
-              "${R_USER}@${R_HOST}" \
-              "cd '${REMOTE_PATH}/offload' && find out/soong/.intermediates -path '*/linux_glibc_*/*' -type f 2>/dev/null | tar -cf - -T -" \
-              | tar -xf - 2>/dev/null || true
-          fi
-
-          HANDOFF_FLAG="/tmp/handoff_triggered"
-          rm -f "$HANDOFF_FLAG"
-
-          save_small_cache_stream() {
-            echo "=== Streaming small (<256KB) intermediates to remote cache ==="
-            find out/soong/.intermediates out/target -type f ! -type l -size -256k 2>/dev/null \
-              | tar -cf - -T - 2>/dev/null | gzip -1 \
-              | ssh "${SSH_OPTS[@]}" -o ConnectTimeout=30 \
-                "${R_USER}@${R_HOST}" \
-                "cat > '${REMOTE_PATH}/ninja_state/small_cache.tar.gz.tmp' && mv -f '${REMOTE_PATH}/ninja_state/small_cache.tar.gz.tmp' '${REMOTE_PATH}/ninja_state/small_cache.tar.gz'" \
-              && echo "=== Updated small_cache.tar.gz on remote device ===" || true
-          }
-
-          offload_completed_artifacts() {
-            local FORCE_LOW=${1:-0}
-            [ -f "$HANDOFF_FLAG" ] && return 0
-
-            find out/soong/.intermediates out/target -type f ! -type l ! -path '*/linux_glibc_*/*' -size +256k -mmin +1 ! -name 'lineage-*.zip' ! -name '*.img' -printf '%s\t%p\n' 2>/dev/null > /tmp/offload_sized.txt || true
-
-            local PENDING_BYTES=$(awk -F'\t' '{s+=$1} END {print s+0}' /tmp/offload_sized.txt)
-            local PENDING_GB=$(awk "BEGIN {printf \"%.2f\", $PENDING_BYTES / 1073741824}")
-
-            if [ "$PENDING_BYTES" -lt 1610612736 ] && [ "$FORCE_LOW" -eq 0 ]; then
-              echo "=== Skipping offload (only ${PENDING_GB} GB ready; waiting for >= 1.50 GB) ==="
-              return 0
-            fi
-
-            if [ "$PENDING_BYTES" -gt 0 ]; then
-              cut -f2- /tmp/offload_sized.txt > /tmp/offload_list.txt
-
-              local PAUSED=0
-              local CUR_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-              if [ "${CUR_FREE_GB:-0}" -lt 6 ] && kill -0 $BUILD_PID 2>/dev/null; then
-                echo "=== Critical disk (${CUR_FREE_GB}G free) — pausing compiler workers during ${PENDING_GB} GB offload ==="
-                pkill -STOP -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
-                PAUSED=1
-              fi
-
-              local REMOTE_DIR="${REMOTE_PATH}/offload"
-
-              if tar -cf - -T /tmp/offload_list.txt | ssh "${SSH_OPTS[@]}" \
-                -o Compression=yes \
-                -c aes128-gcm@openssh.com \
-                "${R_USER}@${R_HOST}" \
-                "mkdir -p '${REMOTE_DIR}' && tar -xf - -C '${REMOTE_DIR}'"; then
-                python3 -c 'import os; files=[l.strip() for l in open("/tmp/offload_list.txt") if l.strip()]; sz=sum(os.path.getsize(s) for s in files if os.path.exists(s) and not os.path.islink(s)); [os.unlink(s) or os.symlink(f"/mnt/remote_out/offload/{s}",s) for s in files if os.path.exists(s) and not os.path.islink(s)]; print(f"=== Bulk-offloaded {len(files)} files ({sz/(1024**3):.2f} GB) ===")'
-              else
-                echo "=== Bulk tar offload interrupted or failed; will retry next cycle ==="
-              fi
-
-              [ $PAUSED -eq 1 ] && pkill -CONT -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
-            else
-              echo "=== No completed files >= 256KB available to offload ==="
-            fi
-
-            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
-          }
-
-          echo "=== Space Before Build (Runner Root vs Mounted Android Storage) ==="
-          df -h / /mnt/remote_out
-
-          export LD_LIBRARY_PATH="$PWD/out/host/linux-x86/lib64:$PWD/out/host/linux-x86/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          JOB_START_EPOCH=$(date +%s)
-          BUILD_LOG="$TMPDIR/build.log"
-          mka bacon -j6 > "$BUILD_LOG" 2>&1 &
-          BUILD_PID=$!
-          LAST_BUCKET=0
-
-          (
-            while true; do
-              sleep 30
-              NOW_EPOCH=$(date +%s)
-              if [ $((NOW_EPOCH - JOB_START_EPOCH)) -ge 20100 ]; then
-                echo "[$(date -u +%H:%M:%S)] WATCHDOG: 335-minute cutoff reached — interrupting active build/offload for clean handoff..."
-                touch "$HANDOFF_FLAG"
-                pkill -TERM -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
-                pkill -TERM -f 'tar -cf - -T /tmp/offload_list.txt' 2>/dev/null || true
-                sleep 5
-                pkill -9 -f 'soong_ui|ninja|clang|java' 2>/dev/null || true
-                break
-              fi
-            done
-          ) &
-          WATCHDOG_TIMER_PID=$!
-
-          while kill -0 $BUILD_PID 2>/dev/null && [ ! -f "$HANDOFF_FLAG" ]; do
-            sleep 60
-            [ -f "$HANDOFF_FLAG" ] && break
-
-            PROGRESS=$(tr '\r' '\n' < "$BUILD_LOG" | grep -E '^\[ *[0-9]+%' | grep -v '/398\]' | tail -n 1 || true)
-            PCT=$(echo "$PROGRESS" | sed -n 's/^\[ *\([0-9]\+\)%.*/\1/p')
-            PCT=${PCT:-0}
-            BUCKET=$((PCT / 5))
-            ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-
-            if [ "${ROOT_FREE_GB:-0}" -lt 4 ]; then
-              echo "[$(date -u +%H:%M:%S)] Critical disk (${ROOT_FREE_GB}G free) — forcing offload..."
-              offload_completed_artifacts 1
-              LAST_BUCKET=$BUCKET
-            elif [ "$BUCKET" -gt "$LAST_BUCKET" ] || [ "${ROOT_FREE_GB:-0}" -lt 12 ]; then
-              echo "[$(date -u +%H:%M:%S)] Checking offload at ${PCT}% (Root free: ${ROOT_FREE_GB}G)..."
-              offload_completed_artifacts 0
-              LAST_BUCKET=$BUCKET
-            fi
-
-            ROOT_FREE=$(df -h / | awk 'NR==2 {print $4}')
-            OUT_FREE=$(df -h /mnt/remote_out | awk 'NR==2 {print $4}')
-            echo "[$(date -u +%H:%M:%S)] ${PROGRESS:-Starting...} | Root free: ${ROOT_FREE} | Remote /out free: ${OUT_FREE}"
+          ssh -p "$REMOTE_PORT" "$REMOTE_DEST" "mkdir -p ${REMOTE_DIR}"
+          for f in "$PRODUCT_OUT"/lineage-*.zip "$PRODUCT_OUT"/*.img; do
+            [ -f "$f" ] && scp -P "$REMOTE_PORT" "$f" "${REMOTE_DEST}:${REMOTE_DIR}/"
           done
 
-          if [ -f "$HANDOFF_FLAG" ]; then
-            echo "=== Flushing Ninja state & small cache before chaining next run ==="
-            cp -f out/.ninja_log out/.ninja_deps /mnt/remote_out/ninja_state/ 2>/dev/null || true
-            save_small_cache_stream
-
-            echo "=== Dispatching continuation workflow run ==="
-            curl -fsSL -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" \
-              -d "{\"ref\":\"${{ github.ref_name }}\"}"
-
-            echo "=== Next workflow run queued successfully ==="
-            exit 0
-          fi
-
-          kill $WATCHDOG_TIMER_PID 2>/dev/null || true
-          BUILD_STATUS=0
-          wait $BUILD_PID || BUILD_STATUS=$?
-
-          offload_completed_artifacts 1
-
-          if [ $BUILD_STATUS -ne 0 ]; then
-            echo "=== BUILD FAILED (exit code $BUILD_STATUS) — ERROR CONTEXT ==="
-            grep -B 5 -A 30 'FAILED:' "$BUILD_LOG" | tail -n 120 || tail -n 100 "$BUILD_LOG"
-            exit 1
-          fi
-
-          save_small_cache_stream
-
-          echo "=== Copying Final Flashable ROM to Android Storage ==="
-          cp -f out/target/product/Freyr_10_1_WiFi/lineage-*.zip /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
-          cp -f out/target/product/Freyr_10_1_WiFi/*.img /mnt/remote_out/FINAL_ROM/ 2>/dev/null || true
-          ls -lh /mnt/remote_out/FINAL_ROM/
-
-      - name: Unmount Remote Drive
-        if: always()
-        run: |
-          fusermount -u /mnt/remote_out || true
+      - name: Upload GitHub Release Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-20-${{ inputs.device }}
+          if-no-files-found: warn
+          path: |
+            /mnt/out/target/product/${{ inputs.device }}/lineage-*.zip
+            /mnt/out/target/product/${{ inputs.device }}/boot.img
+            /mnt/out/target/product/${{ inputs.device }}/system.img
+            /mnt/out/target/product/${{ inputs.device }}/vendor.img
+            /mnt/out/target/product/${{ inputs.device }}/recovery.img

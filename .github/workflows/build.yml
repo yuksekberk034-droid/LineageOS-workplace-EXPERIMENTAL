@@ -3,10 +3,15 @@ name: Build LineageOS 20.0
 on:
   workflow_dispatch:
     inputs:
-      device:
-        description: "Product name (matches lineage_<device>.mk)"
+      product:
+        description: "Lunch product name (matches lineage_<product>.mk)"
         required: true
         default: "8492A"
+        type: string
+      device:
+        description: "Device codename / PRODUCT_DEVICE (matches device/tcl/<device>)"
+        required: true
+        default: "Freyr_10_1_WiFi"
         type: string
       build_type:
         description: "Build variant"
@@ -128,12 +133,12 @@ jobs:
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1 --git-lfs
           repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j"$(nproc)"
 
-          # Clone TCL Tab 10L Gen 2 (8492A) device and vendor trees
+          # Clone into DEVICE_PATH (device/tcl/Freyr_10_1_WiFi) and vendor/tcl/Freyr_10_1_WiFi
           mkdir -p device/tcl vendor/tcl
-          git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git device/tcl/8492A
-          git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git vendor/tcl/8492A
+          git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
+          git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          ls -la device/tcl/8492A/AndroidProducts.mk device/tcl/8492A/lineage_8492A.mk
+          ls -la "device/tcl/${{ inputs.device }}/AndroidProducts.mk" "device/tcl/${{ inputs.device }}/lineage_${{ inputs.product }}.mk"
           df -h / /mnt
 
       - name: Restore Build Checkpoint from Remote Server
@@ -152,7 +157,7 @@ jobs:
           set +e
           cd ~/android
           source build/envsetup.sh
-          lunch "lineage_${{ inputs.device }}-${{ inputs.build_type }}"
+          lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
 
           timeout --signal=TERM 295m mka ${{ inputs.target }} -j"$(nproc)"
           BUILD_EXIT=$?

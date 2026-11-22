@@ -152,14 +152,16 @@ jobs:
             | zstd -d -T0 \
             | tar -xf - -C /mnt/out
 
-      - name: Build LineageOS (With 4h55m Timeout Checkpointing)
+       - name: Build LineageOS (With 4h55m Timeout Checkpointing)
         run: |
           set +e
           cd ~/android
-          source build/envsetup.sh
-          lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
-
-          timeout --signal=TERM 295m mka ${{ inputs.target }} -j"$(nproc)"
+          timeout --signal=TERM 295m bash -c '
+            set -e
+            source build/envsetup.sh
+            lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
+            mka ${{ inputs.target }} -j"$(nproc)"
+          '
           BUILD_EXIT=$?
           set -e
 
@@ -181,6 +183,7 @@ jobs:
             echo "Build failed with exit code $BUILD_EXIT"
             exit "$BUILD_EXIT"
           fi
+
 
       - name: Upload Finished Artifacts to Remote Server
         if: success() && env.REMOTE_HOST != ''

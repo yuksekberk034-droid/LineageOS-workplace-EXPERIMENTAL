@@ -152,7 +152,7 @@ jobs:
             | zstd -d -T0 \
             | tar -xf - -C /mnt/out
 
-       - name: Build LineageOS (With 4h55m Timeout Checkpointing)
+      - name: Build LineageOS (With 4h55m Timeout Checkpointing)
         run: |
           set +e
           cd ~/android

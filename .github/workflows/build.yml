@@ -48,7 +48,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 355
     env:
       TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
@@ -96,8 +96,8 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             bc bison build-essential curl flex g++-multilib gcc-multilib git \
             git-lfs gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev \
-            lib32z1-dev lz4 libncurses6 libncurses-dev libsdl1.2-dev \
-            libssl-dev libxml2-dev libxml2-utils lzop pngcrush rsync schedtool \
+            lib32z1-dev liblz4-tool libncurses6 libncurses-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
             squashfs-tools xsltproc zip zlib1g-dev python-is-python3 zstd sshfs
 
           if [ ! -e /usr/lib/x86_64-linux-gnu/libncurses.so.5 ] && [ -e /usr/lib/x86_64-linux-gnu/libncurses.so.6 ]; then
@@ -116,22 +116,25 @@ jobs:
         with:
           authkey: ${{ env.TS_AUTHKEY }}
 
-      - name: Load SSH Key via ssh-agent
-        if: env.REMOTE_SSH_KEY != '' && env.REMOTE_HOST != ''
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.REMOTE_SSH_KEY }}
-
       - name: Setup Remote SSH & Mount Symbols Cold-Storage
         if: env.REMOTE_SSH_KEY != '' && env.REMOTE_HOST != ''
         run: |
           set -e
           mkdir -p ~/.ssh /tmp/remote_out
           chmod 700 ~/.ssh
-          ssh-keyscan -p "$REMOTE_PORT" -H "$REMOTE_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          # Print public key fingerprint loaded in agent to verify key validity
-          ssh-add -l
+          python3 -c 'import os; k=os.environ["REMOTE_SSH_KEY"].strip()+"\n"; open(os.path.expanduser("~/.ssh/id_remote"),"w").write(k)'
+          chmod 600 ~/.ssh/id_remote
+
+          cat << 'EOF' > ~/.ssh/config
+          Host *
+            IdentityFile ~/.ssh/id_remote
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            PubkeyAcceptedAlgorithms +ssh-rsa
+            HostKeyAlgorithms +ssh-rsa
+          EOF
+          chmod 600 ~/.ssh/config
 
           DEST="${REMOTE_USER}@${REMOTE_HOST}"
           ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/symbols"
@@ -140,7 +143,7 @@ jobs:
 
           mkdir -p "/home/runner/out/target/product/${{ inputs.device }}"
           ln -sfn /tmp/remote_out/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
-          
+
       - name: Sync LineageOS Source & Clone Device/Vendor Trees
         run: |
           set -e
@@ -159,8 +162,7 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
           df -h / /mnt
-          df -h /
-          
+
       - name: Restore Build Checkpoint from Remote Server
         if: inputs.resume_from_remote && env.REMOTE_HOST != ''
         run: |
@@ -181,13 +183,11 @@ jobs:
             set -e
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
-            df -h /
 
             # Replace full .repo (~25-30 GB) with a minimal stub so gettop/build scripts still detect tree root
             rm -rf .repo
             mkdir -p .repo/manifests
             touch .repo/manifest.xml
-            df 
 
             df -h / /mnt
             mka ${{ inputs.target }} -j"$(nproc)"
@@ -198,10 +198,45 @@ jobs:
           if [ "$BUILD_EXIT" -eq 0 ]; then
             echo "Build completed successfully!"
             exit 0
-          elif [ "$BUILD_EXIT" -eq 124 ] \vert{}\vert{} [ "$BUILD_EXIT" -eq 143 ]; then
+          elif [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 143 ]; then
             echo "Build reached 4h55m safety limit. Streaming checkpoint to remote server..."
             if [ -n "$REMOTE_HOST" ]; then
               DEST="${REMOTE_USER}@${REMOTE_HOST}"
               ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}"
-              tar -cPf - /home/runner/out /
-              
+              tar -cPf - /home/runner/out /mnt/out_ext \
+                | zstd -3 -T0 \
+                | ssh -p "$REMOTE_PORT" "$DEST" "cat > ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst"
+              echo "Checkpoint saved. Re-run this workflow with resume_from_remote=true to finish."
+            fi
+            exit 1
+          else
+            echo "Build failed with exit code $BUILD_EXIT"
+            exit "$BUILD_EXIT"
+          fi
+
+      - name: Upload Finished Artifacts to Remote Server
+        if: success() && env.REMOTE_HOST != ''
+        run: |
+          set -e
+          DEST="${REMOTE_USER}@${REMOTE_HOST}"
+          RELEASE_DIR="${REMOTE_OUT_DIR}/releases/${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
+          PRODUCT_OUT="/home/runner/out/target/product/${{ inputs.device }}"
+
+          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${RELEASE_DIR}"
+          for f in "$PRODUCT_OUT"/lineage-*.zip "$PRODUCT_OUT"/*.img; do
+            [ -f "$f" ] && scp -P "$REMOTE_PORT" "$f" "${DEST}:${RELEASE_DIR}/"
+          done
+
+      - name: Upload GitHub Release Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-20-${{ inputs.device }}
+          if-no-files-found: warn
+          path: |
+            /home/runner/out/target/product/${{ inputs.device }}/lineage-*.zip
+            /home/runner/out/target/product/${{ inputs.device }}/boot.img
+            /home/runner/out/target/product/${{ inputs.device }}/system.img
+            /home/runner/out/target/product/${{ inputs.device }}/vendor.img
+            /home/runner/out/target/product/${{ inputs.device }}/recovery.img
+            

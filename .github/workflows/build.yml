@@ -68,11 +68,11 @@ jobs:
           set -e
           sudo systemctl stop systemd-oomd docker docker.socket containerd snapd || true
 
-          # Configure 10 GB ZRAM before purging packages
+          # Configure 12 GB ZRAM (no disk swapfile on /mnt so /mnt keeps ~10.5 GB free)
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
           sudo modprobe zram
-          sudo zramctl /dev/zram0 --algorithm zstd --size 10G
+          sudo zramctl /dev/zram0 --algorithm zstd --size 12G
           sudo mkswap /dev/zram0
           sudo swapon -p 100 /dev/zram0
 
@@ -112,17 +112,11 @@ jobs:
             /usr/share/doc/* \
             /usr/share/man/*
 
-          # 2 GB /mnt/swapfile (12 GB total swap) leaves ~11.5 GB on /mnt for host + target/common
-          sudo fallocate -l 2G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon -p 50 /mnt/swapfile
-
-          mkdir -p /home/runner/out/soong /home/runner/out/target
-          sudo mkdir -p /mnt/out_ext/host /mnt/out_ext/common
+          # Keep ONLY fixed-size out/host (~3.5 GB) on /mnt; keep growing target/common on /
+          mkdir -p /home/runner/out/soong /home/runner/out/target/common
+          sudo mkdir -p /mnt/out_ext/host
           sudo chown -R "$USER:$USER" /mnt/out_ext
           ln -sfn /mnt/out_ext/host /home/runner/out/host
-          ln -sfn /mnt/out_ext/common /home/runner/out/target/common
 
           df -h / /mnt
           free -h
@@ -182,7 +176,7 @@ jobs:
 
           sudo chmod 666 /dev/fuse 2>/dev/null || true
           DEST="${REMOTE_USER}@${REMOTE_HOST}"
-          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/symbols ${REMOTE_OUT_DIR}/cold_offload/soong_inter"
+          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/symbols ${REMOTE_OUT_DIR}/cold_offload/out_offload"
           sshfs -p "$REMOTE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,compression=no \
             "${DEST}:${REMOTE_OUT_DIR}/cold_offload" /tmp/remote_out
 
@@ -206,7 +200,7 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot pinned manifest, then delete .repo and non-kernel .git dirs BEFORE checkpoint restore (~42 GB freed)
+          # Snapshot pinned manifest, then delete .repo and non-kernel .git dirs (~42 GB freed)
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo
           find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
@@ -233,6 +227,16 @@ jobs:
             | zstd -d -T0 \
             | tar -xPf - --overwrite
 
+          # Migrate target/common off /mnt onto / so /mnt cannot fill up during Java compilation
+          if [ -L /home/runner/out/target/common ]; then
+            rm -f /home/runner/out/target/common
+            mkdir -p /home/runner/out/target/common
+            if [ -d /mnt/out_ext/common ]; then
+              cp -a /mnt/out_ext/common/. /home/runner/out/target/common/
+              rm -rf /mnt/out_ext/common
+            fi
+          fi
+
           df -h / /mnt
 
       - name: Build LineageOS (Atomic Cold-Offload + Checkpointing)
@@ -240,24 +244,27 @@ jobs:
           set +e
           cd ~/android
 
-          # Atomic background cold-offloader: only triggers if / drops below 14 GB free.
+          # Proactive atomic cold-offloader: triggers whenever / drops below 22 GB free
+          # and offloads idle subtrees across soong/.intermediates, target/common/obj, and product/obj
           (
+            OUT_ROOT="/home/runner/out"
+            DEVICE_OBJ="$OUT_ROOT/target/product/${{ inputs.device }}/obj"
             while true; do
-              sleep 45
+              sleep 20
               ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-              if [ "$ROOT_FREE_GB" -lt 14 ] && mountpoint -q /tmp/remote_out; then
-                INTER_ROOT="/home/runner/out/soong/.intermediates"
-                if [ -d "$INTER_ROOT" ]; then
-                  for grp in prebuilts frameworks hardware packages system vendor art libcore dalvik tools external; do
-                    [ -d "$INTER_ROOT/$grp" ] || continue
-                    for sub in "$INTER_ROOT/$grp"/*; do
+              if [ "$ROOT_FREE_GB" -lt 22 ] && mountpoint -q /tmp/remote_out; then
+                for base in "$OUT_ROOT/soong/.intermediates" "$OUT_ROOT/target/common/obj" "$DEVICE_OBJ"; do
+                  [ -d "$base" ] || continue
+                  for grp in "$base"/*; do
+                    [ -d "$grp" ] && [ ! -L "$grp" ] || continue
+                    for sub in "$grp"/*; do
                       [ -d "$sub" ] && [ ! -L "$sub" ] || continue
                       case "$(basename "$sub")" in
                         clang|llvm) continue ;;
                       esac
-                      if [ -z "$(find "$sub" -mmin -10 2>/dev/null | head -n 1)" ]; then
-                        REL="${sub#$INTER_ROOT/}"
-                        DEST_DIR="/tmp/remote_out/soong_inter/$REL"
+                      if [ -z "$(find "$sub" -mmin -6 2>/dev/null | head -n 1)" ]; then
+                        REL="${sub#$OUT_ROOT/}"
+                        DEST_DIR="/tmp/remote_out/out_offload/$REL"
                         STAGE_DIR="${DEST_DIR}.stage"
                         mkdir -p "$(dirname "$DEST_DIR")"
                         rm -rf "$STAGE_DIR" "$DEST_DIR"
@@ -266,16 +273,16 @@ jobs:
                           mv "$sub" "${sub}.old"
                           ln -s "$DEST_DIR" "$sub"
                           rm -rf "${sub}.old"
-                          echo "[Cold-Offload] Atomically moved $REL -> remote (Root free: $(df -BG / | awk 'NR==2 {print $4}'))"
+                          echo "[Cold-Offload] Moved $REL -> remote (Root free: $(df -BG / | awk 'NR==2 {print $4}'))"
                         else
                           rm -rf "$STAGE_DIR"
                         fi
                         ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-                        [ "$ROOT_FREE_GB" -ge 20 ] && break 2
+                        [ "$ROOT_FREE_GB" -ge 28 ] && break 3
                       fi
                     done
                   done
-                fi
+                done
               fi
             done
           ) &
@@ -338,4 +345,3 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
-            

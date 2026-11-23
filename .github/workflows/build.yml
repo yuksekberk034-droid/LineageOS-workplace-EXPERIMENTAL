@@ -112,11 +112,12 @@ jobs:
             /usr/share/doc/* \
             /usr/share/man/*
 
-          # Keep ONLY fixed-size out/host (~3.5 GB) on /mnt; keep growing target/common on /
-          mkdir -p /home/runner/out/soong /home/runner/out/target/common
-          sudo mkdir -p /mnt/out_ext/host
+          # Place fixed-size out/host (~3.5 GB) and symbols (~3 GB) on local /mnt (14 GB total)
+          mkdir -p /home/runner/out/soong /home/runner/out/target/common "/home/runner/out/target/product/${{ inputs.device }}"
+          sudo mkdir -p /mnt/out_ext/host /mnt/out_ext/symbols
           sudo chown -R "$USER:$USER" /mnt/out_ext
           ln -sfn /mnt/out_ext/host /home/runner/out/host
+          ln -sfn /mnt/out_ext/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
 
           df -h / /mnt
           free -h
@@ -176,12 +177,9 @@ jobs:
 
           sudo chmod 666 /dev/fuse 2>/dev/null || true
           DEST="${REMOTE_USER}@${REMOTE_HOST}"
-          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/symbols ${REMOTE_OUT_DIR}/cold_offload/out_offload"
+          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/out_offload"
           sshfs -p "$REMOTE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,compression=no \
             "${DEST}:${REMOTE_OUT_DIR}/cold_offload" /tmp/remote_out
-
-          mkdir -p "/home/runner/out/target/product/${{ inputs.device }}"
-          ln -sfn /tmp/remote_out/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
 
       - name: Sync LineageOS Source, Clone Trees & Strip .repo/.git
         run: |
@@ -200,7 +198,7 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot pinned manifest, then delete .repo and non-kernel .git dirs (~42 GB freed)
+          # Snapshot pinned manifest, then delete .repo and non-kernel .git dirs BEFORE checkpoint restore (~42 GB freed)
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo
           find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
@@ -237,6 +235,12 @@ jobs:
             fi
           fi
 
+          # Point symbols to local /mnt/out_ext/symbols instead of SSHFS to prevent FUSE I/O errors
+          sudo mkdir -p /mnt/out_ext/symbols
+          sudo chown -R "$USER:$USER" /mnt/out_ext
+          rm -rf "/home/runner/out/target/product/${{ inputs.device }}/symbols"
+          ln -sfn /mnt/out_ext/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
+
           df -h / /mnt
 
       - name: Build LineageOS (Atomic Cold-Offload + Checkpointing)
@@ -244,15 +248,21 @@ jobs:
           set +e
           cd ~/android
 
-          # Proactive atomic cold-offloader: triggers whenever / drops below 22 GB free
-          # and offloads idle subtrees across soong/.intermediates, target/common/obj, and product/obj
+          # Proactive atomic cold-offloader with SSHFS health check
           (
             OUT_ROOT="/home/runner/out"
             DEVICE_OBJ="$OUT_ROOT/target/product/${{ inputs.device }}/obj"
+            DEST="${REMOTE_USER}@${REMOTE_HOST}"
             while true; do
               sleep 20
               ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-              if [ "$ROOT_FREE_GB" -lt 22 ] && mountpoint -q /tmp/remote_out; then
+              if [ "$ROOT_FREE_GB" -lt 22 ] && [ -n "$REMOTE_HOST" ]; then
+                if ! ls /tmp/remote_out >/dev/null 2>&1; then
+                  fusermount -uz /tmp/remote_out 2>/dev/null || true
+                  sshfs -p "$REMOTE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,compression=no \
+                    "${DEST}:${REMOTE_OUT_DIR}/cold_offload" /tmp/remote_out 2>/dev/null || true
+                fi
+                mountpoint -q /tmp/remote_out || continue
                 for base in "$OUT_ROOT/soong/.intermediates" "$OUT_ROOT/target/common/obj" "$DEVICE_OBJ"; do
                   [ -d "$base" ] || continue
                   for grp in "$base"/*; do
@@ -345,3 +355,4 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
+            

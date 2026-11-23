@@ -112,8 +112,8 @@ jobs:
             /usr/share/doc/* \
             /usr/share/man/*
 
-          # Add 4 GB /mnt/swapfile (14 GB total swap) and put fixed-size host + target/common on /mnt
-          sudo fallocate -l 4G /mnt/swapfile
+          # 2 GB /mnt/swapfile (12 GB total swap) leaves ~11.5 GB on /mnt for host + target/common
+          sudo fallocate -l 2G /mnt/swapfile
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
           sudo swapon -p 50 /mnt/swapfile
@@ -189,7 +189,7 @@ jobs:
           mkdir -p "/home/runner/out/target/product/${{ inputs.device }}"
           ln -sfn /tmp/remote_out/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
 
-      - name: Sync LineageOS Source & Clone Device/Vendor Trees
+      - name: Sync LineageOS Source, Clone Trees & Strip .repo/.git
         run: |
           set -e
           mkdir -p ~/android
@@ -205,6 +205,16 @@ jobs:
           mkdir -p device/tcl vendor/tcl
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
+
+          # Snapshot pinned manifest, then delete .repo and non-kernel .git dirs BEFORE checkpoint restore (~42 GB freed)
+          repo manifest -o /tmp/build-manifest-snapshot.xml -r
+          rm -rf .repo
+          find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
+
+          mkdir -p .repo/manifests .repo/repo
+          cp /tmp/build-manifest-snapshot.xml .repo/manifest.xml
+          printf "#!/usr/bin/env python3\nimport sys\nif \"manifest\" in sys.argv[1:]:\n    sys.stdout.write(open(\"/tmp/build-manifest-snapshot.xml\").read())\n" > .repo/repo/repo
+          chmod +x .repo/repo/repo
 
           df -h / /mnt
 
@@ -222,15 +232,15 @@ jobs:
           ssh -p "$REMOTE_PORT" "$DEST" "cat ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst" \
             | zstd -d -T0 \
             | tar -xPf - --overwrite
-            
 
-      - name: Build LineageOS (Strip .git/.repo + Atomic Cold-Offload + Checkpointing)
+          df -h / /mnt
+
+      - name: Build LineageOS (Atomic Cold-Offload + Checkpointing)
         run: |
           set +e
           cd ~/android
 
           # Atomic background cold-offloader: only triggers if / drops below 14 GB free.
-          # Stages full copy first before swapping symlink so files never vanish mid-compile.
           (
             while true; do
               sleep 45
@@ -275,16 +285,6 @@ jobs:
             set -e
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
-
-            # Snapshot pinned manifest, then delete .repo and non-kernel .git dirs (~40 GB freed)
-            repo manifest -o /tmp/build-manifest-snapshot.xml -r
-            rm -rf .repo
-            find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
-
-            mkdir -p .repo/manifests .repo/repo
-            cp /tmp/build-manifest-snapshot.xml .repo/manifest.xml
-            printf "#!/usr/bin/env python3\nimport sys\nif \"manifest\" in sys.argv[1:]:\n    sys.stdout.write(open(\"/tmp/build-manifest-snapshot.xml\").read())\n" > .repo/repo/repo
-            chmod +x .repo/repo/repo
 
             df -h / /mnt
             free -h

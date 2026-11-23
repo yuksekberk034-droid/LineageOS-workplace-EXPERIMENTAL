@@ -214,10 +214,15 @@ jobs:
           set -e
           DEST="${REMOTE_USER}@${REMOTE_HOST}"
 
+          # Backdate freshly synced source files so Ninja does not rebuild the 81,851 completed targets
+          echo "Backdating source tree timestamps to preserve checkpoint mtimes..."
+          find ~/android -exec touch -h -t 202001010000 {} +
+
           echo "Streaming checkpoint from ${DEST}:${REMOTE_OUT_DIR}/out_checkpoint.tar.zst..."
           ssh -p "$REMOTE_PORT" "$DEST" "cat ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst" \
             | zstd -d -T0 \
-            | tar -xPf -
+            | tar -xPf - --overwrite
+            
 
       - name: Build LineageOS (Strip .git/.repo + Atomic Cold-Offload + Checkpointing)
         run: |

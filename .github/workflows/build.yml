@@ -9,7 +9,7 @@ on:
         default: "8492A"
         type: string
       device:
-        description: "Device codename / PRODUCT_DEVICE (matches device/tcl/<device>)"
+        description: "Device codename / PRODUCT_DEVICE"
         required: true
         default: "Freyr_10_1_WiFi"
         type: string
@@ -23,18 +23,21 @@ on:
           - eng
           - user
       target:
-        description: "Make target (use partition images for bringup, bacon for full zip)"
+        description: "Make target"
         required: true
         default: "systemimage vendorimage bootimage"
         type: choice
         options:
           - systemimage vendorimage bootimage
           - bacon
-      resume_from_remote:
-        description: "Resume from a previous timeout checkpoint on remote server"
+      resume_from_checkpoint:
+        description: "Resume from a previous timeout checkpoint GitHub Release"
         required: true
         default: false
         type: boolean
+
+permissions:
+  contents: write
 
 env:
   MANIFEST_URL: "https://github.com/LineageOS/android.git"
@@ -49,18 +52,16 @@ env:
   ART_BUILD_HOST_DEBUG: "false"
   GOGC: "40"
   _JAVA_OPTIONS: "-Xmx6g"
-  REMOTE_PORT: "8022"
-  REMOTE_OUT_DIR: "lineage_out"
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 355
+    permissions:
+      contents: write
     env:
-      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
-      REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
-      REMOTE_USER: ${{ secrets.REMOTE_USER }}
-      REMOTE_SSH_KEY: ${{ secrets.REMOTE_SSH_KEY }}
+      STORAGE_REPO: ${{ secrets.STORAGE_REPO || github.repository }}
+      GH_TOKEN: ${{ secrets.STORAGE_TOKEN || secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Purge Unused Ubuntu Packages & Configure ZRAM + Storage
@@ -68,7 +69,6 @@ jobs:
           set -e
           sudo systemctl stop systemd-oomd docker docker.socket containerd snapd || true
 
-          # Configure 12 GB ZRAM (no disk swapfile on /mnt so /mnt keeps ~10.5 GB free)
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
           sudo modprobe zram
@@ -76,44 +76,25 @@ jobs:
           sudo mkswap /dev/zram0
           sudo swapon -p 100 /dev/zram0
 
-          # Purge heavy pre-installed Ubuntu packages not needed for AOSP/LineageOS (~25 GB freed)
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
             'temurin-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \
             'azure-cli' 'google-cloud-cli' 'powershell' 'dotnet*' 'mono-*' \
             'llvm-*' 'clang-*' 'mysql-*' 'postgresql-*' 'php*' 'ruby*' \
-            'snapd' 'apport*' 'man-db' 'fonts-noto*' || true
+            'snapd' || true
           sudo apt-get autoremove -y --purge || true
           sudo apt-get clean
 
           sudo rm -rf \
             /var/lib/docker \
-            /var/lib/snapd \
-            /var/cache/snapd \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /opt/ghc \
             /opt/hostedtoolcache \
-            /opt/az \
-            /opt/microsoft \
-            /opt/google \
+            /usr/local/lib/android \
             /usr/share/miniconda \
             /usr/share/swift \
-            /usr/share/rustup \
-            /usr/local/cargo \
-            /usr/local/.ghcup \
-            /usr/local/share/boost \
-            /usr/local/share/chromium \
-            /usr/local/share/powershell \
-            /usr/local/share/vcpkg \
-            /usr/local/lib/node_modules \
-            /usr/local/aws-cli \
-            /usr/local/aws-sam-cli \
-            /usr/local/julia* \
-            /usr/share/doc/* \
-            /usr/share/man/*
+            /usr/share/rustup
 
-          # Place fixed-size out/host (~3.5 GB) and symbols (~3 GB) on local /mnt (14 GB total)
-          mkdir -p /home/runner/out/soong /home/runner/out/target/common "/home/runner/out/target/product/${{ inputs.device }}"
+          mkdir -p /home/runner/out/soong/.intermediates \
+            /home/runner/out/target/common \
+            "/home/runner/out/target/product/${{ inputs.device }}"
           sudo mkdir -p /mnt/out_ext/host /mnt/out_ext/symbols
           sudo chown -R "$USER:$USER" /mnt/out_ext
           ln -sfn /mnt/out_ext/host /home/runner/out/host
@@ -130,8 +111,12 @@ jobs:
             bc bison build-essential ca-certificates curl flex g++-multilib gcc-multilib \
             git git-lfs gnupg gperf lib32ncurses-dev lib32readline-dev lib32z1-dev \
             liblz4-tool libncurses6 libncurses-dev libsdl1.2-dev libssl-dev \
-            libxml2 libxml2-utils lzop openssh-client pngcrush rsync schedtool \
-            squashfs-tools unzip xsltproc zip zlib1g-dev python-is-python3 zstd sshfs
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools unzip xsltproc zip zlib1g-dev python-is-python3 zstd
+
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh
+          fi
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
@@ -144,42 +129,6 @@ jobs:
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/.bin/repo
           chmod a+x ~/.bin/repo
           echo "$HOME/.bin" >> "$GITHUB_PATH"
-
-      - name: Connect Tailscale
-        if: env.TS_AUTHKEY != ''
-        uses: tailscale/github-action@v2
-        with:
-          authkey: ${{ env.TS_AUTHKEY }}
-
-      - name: Setup Remote SSH & Mount Cold-Storage
-        if: env.REMOTE_SSH_KEY != '' && env.REMOTE_HOST != ''
-        run: |
-          set -e
-          mkdir -p ~/.ssh /tmp/remote_out
-          chmod 700 ~/.ssh
-
-          if printf '%s' "$REMOTE_SSH_KEY" | grep -q "BEGIN"; then
-            printf '%s\n' "$REMOTE_SSH_KEY" | tr -d '\r' > ~/.ssh/id_remote
-          else
-            printf '%s' "$REMOTE_SSH_KEY" | tr -d ' \n\r\t' | base64 -d > ~/.ssh/id_remote
-          fi
-          chmod 600 ~/.ssh/id_remote
-
-          ssh-keygen -y -f ~/.ssh/id_remote > /dev/null
-
-          cat << 'EOF' > ~/.ssh/config
-          Host *
-            IdentityFile ~/.ssh/id_remote
-            StrictHostKeyChecking no
-            UserKnownHostsFile /dev/null
-          EOF
-          chmod 600 ~/.ssh/config
-
-          sudo chmod 666 /dev/fuse 2>/dev/null || true
-          DEST="${REMOTE_USER}@${REMOTE_HOST}"
-          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}/cold_offload/out_offload"
-          sshfs -p "$REMOTE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,compression=no \
-            "${DEST}:${REMOTE_OUT_DIR}/cold_offload" /tmp/remote_out
 
       - name: Sync LineageOS Source, Clone Trees & Strip .repo/.git
         run: |
@@ -198,44 +147,37 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot pinned manifest, then delete .repo and non-kernel .git dirs BEFORE checkpoint restore (~42 GB freed)
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo
           find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
 
           mkdir -p .repo/manifests .repo/repo
           cp /tmp/build-manifest-snapshot.xml .repo/manifest.xml
-          printf "#!/usr/bin/env python3\nimport sys\nif \"manifest\" in sys.argv[1:]:\n    sys.stdout.write(open(\"/tmp/build-manifest-snapshot.xml\").read())\n" > .repo/repo/repo
+          printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
           df -h / /mnt
 
-      - name: Restore Build Checkpoint from Remote Server
-        if: inputs.resume_from_remote && env.REMOTE_HOST != ''
+      - name: Restore Build Checkpoint from GitHub Release
+        if: inputs.resume_from_checkpoint
         run: |
           set -e
-          DEST="${REMOTE_USER}@${REMOTE_HOST}"
+          mkdir -p /tmp/ckpt
 
-          # Backdate freshly synced source files so Ninja does not rebuild the 81,851 completed targets
-          echo "Backdating source tree timestamps to preserve checkpoint mtimes..."
           find ~/android -exec touch -h -t 202001010000 {} +
 
-          echo "Streaming checkpoint from ${DEST}:${REMOTE_OUT_DIR}/out_checkpoint.tar.zst..."
-          ssh -p "$REMOTE_PORT" "$DEST" "cat ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst" \
-            | zstd -d -T0 \
-            | tar -xPf - --overwrite
+          gh release download build-checkpoint \
+            --repo "$STORAGE_REPO" \
+            --dir /tmp/ckpt \
+            --pattern 'out_checkpoint.tar.zst.part_*'
+          cat /tmp/ckpt/out_checkpoint.tar.zst.part_* | zstd -d -T0 | tar -xPf - --overwrite
+          rm -rf /tmp/ckpt
 
-          # Migrate target/common off /mnt onto / so /mnt cannot fill up during Java compilation
           if [ -L /home/runner/out/target/common ]; then
             rm -f /home/runner/out/target/common
-            mkdir -p /home/runner/out/target/common
-            if [ -d /mnt/out_ext/common ]; then
-              cp -a /mnt/out_ext/common/. /home/runner/out/target/common/
-              rm -rf /mnt/out_ext/common
-            fi
           fi
+          mkdir -p /home/runner/out/target/common
 
-          # Point symbols to local /mnt/out_ext/symbols instead of SSHFS to prevent FUSE I/O errors
           sudo mkdir -p /mnt/out_ext/symbols
           sudo chown -R "$USER:$USER" /mnt/out_ext
           rm -rf "/home/runner/out/target/product/${{ inputs.device }}/symbols"
@@ -243,60 +185,10 @@ jobs:
 
           df -h / /mnt
 
-      - name: Build LineageOS (Atomic Cold-Offload + Checkpointing)
+      - name: Build LineageOS
         run: |
           set +e
           cd ~/android
-
-          # Proactive atomic cold-offloader with SSHFS health check
-          (
-            OUT_ROOT="/home/runner/out"
-            DEVICE_OBJ="$OUT_ROOT/target/product/${{ inputs.device }}/obj"
-            DEST="${REMOTE_USER}@${REMOTE_HOST}"
-            while true; do
-              sleep 20
-              ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-              if [ "$ROOT_FREE_GB" -lt 22 ] && [ -n "$REMOTE_HOST" ]; then
-                if ! ls /tmp/remote_out >/dev/null 2>&1; then
-                  fusermount -uz /tmp/remote_out 2>/dev/null || true
-                  sshfs -p "$REMOTE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,compression=no \
-                    "${DEST}:${REMOTE_OUT_DIR}/cold_offload" /tmp/remote_out 2>/dev/null || true
-                fi
-                mountpoint -q /tmp/remote_out || continue
-                for base in "$OUT_ROOT/soong/.intermediates" "$OUT_ROOT/target/common/obj" "$DEVICE_OBJ"; do
-                  [ -d "$base" ] || continue
-                  for grp in "$base"/*; do
-                    [ -d "$grp" ] && [ ! -L "$grp" ] || continue
-                    for sub in "$grp"/*; do
-                      [ -d "$sub" ] && [ ! -L "$sub" ] || continue
-                      case "$(basename "$sub")" in
-                        clang|llvm) continue ;;
-                      esac
-                      if [ -z "$(find "$sub" -mmin -6 2>/dev/null | head -n 1)" ]; then
-                        REL="${sub#$OUT_ROOT/}"
-                        DEST_DIR="/tmp/remote_out/out_offload/$REL"
-                        STAGE_DIR="${DEST_DIR}.stage"
-                        mkdir -p "$(dirname "$DEST_DIR")"
-                        rm -rf "$STAGE_DIR" "$DEST_DIR"
-                        if cp -a "$sub" "$STAGE_DIR" 2>/dev/null; then
-                          mv "$STAGE_DIR" "$DEST_DIR"
-                          mv "$sub" "${sub}.old"
-                          ln -s "$DEST_DIR" "$sub"
-                          rm -rf "${sub}.old"
-                          echo "[Cold-Offload] Moved $REL -> remote (Root free: $(df -BG / | awk 'NR==2 {print $4}'))"
-                        else
-                          rm -rf "$STAGE_DIR"
-                        fi
-                        ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-                        [ "$ROOT_FREE_GB" -ge 28 ] && break 3
-                      fi
-                    done
-                  done
-                done
-              fi
-            done
-          ) &
-          OFFLOAD_PID=$!
 
           timeout --signal=TERM 295m bash -c '
             set -e
@@ -308,42 +200,52 @@ jobs:
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?
-          kill "$OFFLOAD_PID" 2>/dev/null || true
-          set -e
 
+          set -e
           if [ "$BUILD_EXIT" -eq 0 ]; then
             echo "Build completed successfully!"
             exit 0
           elif [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 143 ]; then
-            echo "Build reached 4h55m safety limit. Streaming checkpoint to remote server..."
-            if [ -n "$REMOTE_HOST" ]; then
-              DEST="${REMOTE_USER}@${REMOTE_HOST}"
-              ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${REMOTE_OUT_DIR}"
-              tar -cPf - /home/runner/out /mnt/out_ext \
-                | zstd -3 -T0 \
-                | ssh -p "$REMOTE_PORT" "$DEST" "cat > ${REMOTE_OUT_DIR}/out_checkpoint.tar.zst"
-              echo "Checkpoint saved. Re-run this workflow with resume_from_remote=true to finish."
-            fi
+            echo "Build reached 4h55m safety limit. Creating checkpoint release..."
+            mkdir -p /tmp/ckpt
+            set -o pipefail
+            tar -cPf - /home/runner/out /mnt/out_ext \
+              | zstd -3 -T0 \
+              | split -b 1900M - /tmp/ckpt/out_checkpoint.tar.zst.part_
+
+            gh release delete build-checkpoint --repo "$STORAGE_REPO" --yes --cleanup-tag || true
+            gh release create build-checkpoint /tmp/ckpt/out_checkpoint.tar.zst.part_* \
+              --repo "$STORAGE_REPO" \
+              --prerelease \
+              --title "LineageOS 20.0 Build Checkpoint"
+            echo "Checkpoint saved. Re-run with resume_from_checkpoint=true."
             exit 1
           else
             echo "Build failed with exit code $BUILD_EXIT"
             exit "$BUILD_EXIT"
           fi
 
-      - name: Upload Finished Artifacts to Remote Server
-        if: success() && env.REMOTE_HOST != ''
+      - name: Upload Finished Artifacts to GitHub Release
+        if: success()
         run: |
           set -e
-          DEST="${REMOTE_USER}@${REMOTE_HOST}"
-          RELEASE_DIR="${REMOTE_OUT_DIR}/releases/${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
           PRODUCT_OUT="/home/runner/out/target/product/${{ inputs.device }}"
+          RELEASE_TAG="lineage-20-${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
+          ASSETS=()
 
-          ssh -p "$REMOTE_PORT" "$DEST" "mkdir -p ${RELEASE_DIR}"
-          for f in "$PRODUCT_OUT"/lineage-*.zip "$PRODUCT_OUT"/*.img; do
-            [ -f "$f" ] && scp -P "$REMOTE_PORT" "$f" "${DEST}:${RELEASE_DIR}/"
-          done
+          shopt -s nullglob
+          ASSETS+=( "$PRODUCT_OUT"/lineage-*.zip )
+          ASSETS+=( "$PRODUCT_OUT"/boot.img )
+          ASSETS+=( "$PRODUCT_OUT"/system.img )
+          ASSETS+=( "$PRODUCT_OUT"/vendor.img )
+          ASSETS+=( "$PRODUCT_OUT"/recovery.img )
+          shopt -u nullglob
 
-      - name: Upload GitHub Release Artifacts
+          gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
+            --repo "$STORAGE_REPO" \
+            --title "$RELEASE_TAG"
+
+      - name: Upload Build Artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -355,4 +257,3 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
-            

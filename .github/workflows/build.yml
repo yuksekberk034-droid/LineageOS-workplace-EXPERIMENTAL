@@ -167,16 +167,18 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot manifest, then prune .repo, non-kernel .git, macOS prebuilts, legacy JDKs, and CTS (~60 GB freed)
+          # Snapshot manifest, then prune .repo, non-kernel .git, and non-Linux prebuilts (~58 GB freed without breaking Android.bp graphs)
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo \
             prebuilts/*/darwin-x86 \
             prebuilts/*/*/darwin-x86 \
+            prebuilts/*/windows-x86 \
+            prebuilts/*/*/windows-x86 \
             prebuilts/jdk/jdk8 \
             prebuilts/jdk/jdk9 \
-            cts developers docs pdk
+            developers docs pdk
           find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
-
+          
           mkdir -p .repo/manifests .repo/repo
           cp /tmp/build-manifest-snapshot.xml .repo/manifest.xml
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo

@@ -1,0 +1,90 @@
+name: Storage Host Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      clean_storage:
+        description: "Wipe previous checkpoint/offload data on startup"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  storage-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    env:
+      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+      SSH_PRIV_KEY: ${{ secrets.STORAGE_SSH_PRIVATE_KEY || secrets.REMOTE_SSH_KEY }}
+
+    steps:
+      - name: Maximize Local NVMe Space
+        run: |
+          set -e
+          sudo systemctl stop docker docker.socket containerd snapd || true
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+
+          sudo rm -rf \
+            /var/lib/docker \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /opt/az \
+            /usr/share/miniconda \
+            /usr/share/swift \
+            /usr/share/rustup \
+            /usr/local/share/boost \
+            /usr/local/share/chromium \
+            /usr/local/lib/node_modules
+
+          mkdir -p /home/runner/lineage_out/cold_offload/out_offload /home/runner/lineage_out/releases
+          df -h / /mnt
+
+      - name: Connect Tailscale as lineage-storage-host
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ env.TS_AUTHKEY }}
+          hostname: lineage-storage-host
+
+      - name: Configure & Start SSH Server on Port 8022
+        run: |
+          set -e
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          if printf '%s' "$SSH_PRIV_KEY" | grep -q "BEGIN"; then
+            printf '%s\n' "$SSH_PRIV_KEY" | tr -d '\r' > ~/.ssh/temp_key
+          else
+            printf '%s' "$SSH_PRIV_KEY" | tr -d ' \n\r\t' | base64 -d > ~/.ssh/temp_key
+          fi
+          chmod 600 ~/.ssh/temp_key
+
+          ssh-keygen -y -f ~/.ssh/temp_key > ~/.ssh/authorized_keys
+          rm -f ~/.ssh/temp_key
+          chmod 600 ~/.ssh/authorized_keys
+
+          sudo mkdir -p /run/sshd
+          cat << 'EOF' | sudo tee /etc/ssh/sshd_config.d/lineage_host.conf
+          Port 8022
+          PubkeyAuthentication yes
+          PasswordAuthentication no
+          AllowUsers runner
+          Subsystem sftp internal-sftp
+          MaxSessions 32
+          MaxStartups 32:30:64
+          EOF
+
+          sudo /usr/sbin/sshd -t
+          sudo /usr/sbin/sshd
+          echo "Storage host ready at runner@lineage-storage-host:8022"
+
+      - name: Serve Storage Until Cancelled or 5h50m Limit
+        run: |
+          echo "Monitoring storage usage (cancel this workflow once build.yml completes)..."
+          for i in $(seq 1 350); do
+            echo "[$(date -u +%H:%M:%S)] Disk free: $(df -h / | awk 'NR==2 {print $4}') | Storage dir: $(du -sh /home/runner/lineage_out 2>/dev/null | awk '{print $1}')"
+            sleep 60
+          done
+          

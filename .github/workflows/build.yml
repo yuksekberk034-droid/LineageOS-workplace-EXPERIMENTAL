@@ -9,7 +9,7 @@ on:
         default: "8492A"
         type: string
       device:
-        description: "Device codename / PRODUCT_DEVICE"
+        description: "Device codename / PRODUCT_DEVICE (matches device/tcl/<device>)"
         required: true
         default: "Freyr_10_1_WiFi"
         type: string
@@ -156,10 +156,10 @@ jobs:
           authkey: ${{ env.TS_AUTHKEY }}
           hostname: lineage-builder
 
-      - name: Mount Storage Host Runner via SSHFS
+      - name: Verify SSH Connection to Storage Host Runner
         run: |
           set -e
-          mkdir -p ~/.ssh /tmp/remote_out
+          mkdir -p ~/.ssh /tmp/remote_src
           chmod 700 ~/.ssh
 
           if printf '%s' "$SSH_PRIV_KEY" | grep -q "BEGIN"; then
@@ -177,6 +177,7 @@ jobs:
             ConnectTimeout 15
             ServerAliveInterval 15
             ServerAliveCountMax 4
+            Ciphers aes128-gcm@openssh.com
           EOF
           chmod 600 ~/.ssh/config
 
@@ -186,7 +187,7 @@ jobs:
           CONNECTED=0
           for attempt in $(seq 1 12); do
             echo "Waiting for storage host ${DEST}:${STORAGE_PORT} (attempt ${attempt}/12)..."
-            if ssh -p "$STORAGE_PORT" "$DEST" "mkdir -p ${STORAGE_DIR}/cold_offload/out_offload ${STORAGE_DIR}/releases"; then
+            if ssh -p "$STORAGE_PORT" "$DEST" "mkdir -p ${STORAGE_DIR}/src_offload ${STORAGE_DIR}/releases"; then
               CONNECTED=1
               break
             fi
@@ -198,11 +199,7 @@ jobs:
             exit 1
           fi
 
-          sudo chmod 666 /dev/fuse 2>/dev/null || true
-          sshfs -p "$STORAGE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=4,compression=no \
-            "${DEST}:${STORAGE_DIR}/cold_offload" /tmp/remote_out
-
-      - name: Sync LineageOS Source, Clone Trees & Strip .repo/.git Only
+      - name: Sync LineageOS Source & Offload Read-Only Prebuilts to Storage Host
         run: |
           set -e
           mkdir -p ~/android
@@ -219,7 +216,7 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot manifest, then delete ONLY .repo and non-kernel .git dirs (keeps all Android.bp/prebuilts valid)
+          # Snapshot manifest, then delete .repo and non-kernel .git dirs
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo
           find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
@@ -229,6 +226,34 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
+          # Stream ~25 GB of read-only prebuilts to storage host and bind-mount back (keeps 100% of out/ on local NVMe)
+          DEST="${STORAGE_USER}@${STORAGE_HOST}"
+          OFFLOAD_DIRS=(
+            prebuilts/sdk
+            prebuilts/gcc
+            prebuilts/rust
+            prebuilts/misc
+            prebuilts/go
+            prebuilts/jdk
+            external/chromium-webview
+          )
+
+          echo "Streaming read-only prebuilts to storage host..."
+          tar -cf - -C ~/android "${OFFLOAD_DIRS[@]}" \
+            | ssh -p "$STORAGE_PORT" "$DEST" "rm -rf ${STORAGE_DIR}/src_offload/* && tar -xf - -C ${STORAGE_DIR}/src_offload"
+
+          grep -qxF 'user_allow_other' /etc/fuse.conf 2>/dev/null || echo 'user_allow_other' | sudo tee -a /etc/fuse.conf >/dev/null
+          sudo chmod 666 /dev/fuse 2>/dev/null || true
+          sshfs -p "$STORAGE_PORT" \
+            -o allow_other,reconnect,ServerAliveInterval=15,ServerAliveCountMax=4,compression=no,kernel_cache,auto_cache,entry_timeout=300,attr_timeout=300 \
+            "${DEST}:${STORAGE_DIR}/src_offload" /tmp/remote_src
+
+          for d in "${OFFLOAD_DIRS[@]}"; do
+            rm -rf "$HOME/android/$d"
+            mkdir -p "$HOME/android/$d"
+            sudo mount --bind "/tmp/remote_src/$d" "$HOME/android/$d"
+          done
+
           df -h / /mnt
 
       - name: Restore Build Checkpoint from Storage Host
@@ -236,7 +261,7 @@ jobs:
         run: |
           set -e
           DEST="${STORAGE_USER}@${STORAGE_HOST}"
-          find ~/android -exec touch -h -t 202001010000 {} +
+          find ~/android -xdev -exec touch -h -t 202001010000 {} +
 
           ssh -p "$STORAGE_PORT" "$DEST" "cat ${STORAGE_DIR}/out_checkpoint.tar.zst" \
             | zstd -d -T0 \
@@ -254,60 +279,10 @@ jobs:
 
           df -h / /mnt
 
-      - name: Build LineageOS (Atomic Offload to Host Runner + Checkpointing)
+      - name: Build LineageOS
         run: |
           set +e
           cd ~/android
-
-          # Atomic background cold-offloader to storage host runner when / drops below 24 GB free
-          (
-            OUT_ROOT="/home/runner/out"
-            DEVICE_OBJ="$OUT_ROOT/target/product/${{ inputs.device }}/obj"
-            DEST="${STORAGE_USER}@${STORAGE_HOST}"
-            while true; do
-              sleep 20
-              ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-              if [ "$ROOT_FREE_GB" -lt 24 ]; then
-                if ! ls /tmp/remote_out >/dev/null 2>&1; then
-                  fusermount -uz /tmp/remote_out 2>/dev/null || true
-                  sshfs -p "$STORAGE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=4,compression=no \
-                    "${DEST}:${STORAGE_DIR}/cold_offload" /tmp/remote_out 2>/dev/null || true
-                fi
-                mountpoint -q /tmp/remote_out || continue
-                for base in "$OUT_ROOT/soong/.intermediates" "$OUT_ROOT/target/common/obj" "$DEVICE_OBJ"; do
-                  [ -d "$base" ] || continue
-                  for grp in "$base"/*; do
-                    [ -d "$grp" ] && [ ! -L "$grp" ] || continue
-                    for sub in "$grp"/*; do
-                      [ -d "$sub" ] && [ ! -L "$sub" ] || continue
-                      case "$(basename "$sub")" in
-                        clang|llvm) continue ;;
-                      esac
-                      if [ -z "$(find "$sub" -mmin -6 2>/dev/null | head -n 1)" ]; then
-                        REL="${sub#$OUT_ROOT/}"
-                        DEST_DIR="/tmp/remote_out/out_offload/$REL"
-                        STAGE_DIR="${DEST_DIR}.stage"
-                        mkdir -p "$(dirname "$DEST_DIR")"
-                        rm -rf "$STAGE_DIR" "$DEST_DIR"
-                        if cp -a "$sub" "$STAGE_DIR" 2>/dev/null; then
-                          mv "$STAGE_DIR" "$DEST_DIR"
-                          mv "$sub" "${sub}.old"
-                          ln -s "$DEST_DIR" "$sub"
-                          rm -rf "${sub}.old"
-                          echo "[Cold-Offload] Moved $REL -> storage host (Root free: $(df -BG / | awk 'NR==2 {print $4}'))"
-                        else
-                          rm -rf "$STAGE_DIR"
-                        fi
-                        ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-                        [ "$ROOT_FREE_GB" -ge 30 ] && break 3
-                      fi
-                    done
-                  done
-                done
-              fi
-            done
-          ) &
-          OFFLOAD_PID=$!
 
           timeout --signal=TERM 285m bash -c '
             set -e
@@ -319,7 +294,6 @@ jobs:
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?
-          kill "$OFFLOAD_PID" 2>/dev/null || true
           set -e
 
           if [ "$BUILD_EXIT" -eq 0 ]; then
@@ -374,4 +348,3 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
-            

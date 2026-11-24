@@ -1,4 +1,4 @@
-name: Build LineageOS 20.0 (Bacon)
+name: Build LineageOS 20.0 (alone)
 
 on:
   workflow_dispatch:
@@ -30,8 +30,8 @@ on:
         options:
           - systemimage vendorimage bootimage
           - bacon
-      resume_from_remote:
-        description: "Resume from checkpoint stored on storage host runner"
+      resume_from_checkpoint:
+        description: "Resume from a previous timeout checkpoint GitHub Release"
         required: true
         default: false
         type: boolean
@@ -47,37 +47,37 @@ env:
   WITH_TIDY: "false"
   ALLOW_LOCAL_TIDY_TRUE: "false"
   SKIP_ABI_CHECKS: "true"
+  WITH_DEXPREOPT: "false"
   WITH_DEXPREOPT_DEBUG_INFO: "false"
   PRODUCT_MINIMIZE_JAVA_DEBUG_INFO: "true"
   ART_BUILD_TARGET_DEBUG: "false"
   ART_BUILD_HOST_DEBUG: "false"
   GOGC: "40"
   _JAVA_OPTIONS: "-Xmx6g"
-  STORAGE_HOST: "lineage-storage-host-bacon"
-  STORAGE_USER: "runner"
-  STORAGE_PORT: "8022"
-  STORAGE_DIR: "/home/runner/lineage_out"
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 355
+    permissions:
+      contents: write
     env:
-      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
-      SSH_PRIV_KEY: ${{ secrets.STORAGE_SSH_PRIVATE_KEY || secrets.REMOTE_SSH_KEY }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      STORAGE_REPO: ${{ secrets.STORAGE_REPO || github.repository }}
+      GH_TOKEN: ${{ secrets.STORAGE_TOKEN || secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Purge Unused Ubuntu Packages & Configure ZRAM + Storage
+      - name: Purge Unused Ubuntu Packages & Configure ZRAM + Local Storage
         run: |
           set -e
           sudo systemctl stop systemd-oomd docker docker.socket containerd snapd || true
+
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
           sudo modprobe zram
           sudo zramctl /dev/zram0 --algorithm zstd --size 12G
           sudo mkswap /dev/zram0
           sudo swapon -p 100 /dev/zram0
+
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
             'temurin-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \
             'azure-cli' 'google-cloud-cli' 'powershell' 'dotnet*' 'mono-*' \
@@ -85,6 +85,7 @@ jobs:
             'snapd' 'apport*' 'man-db' 'fonts-noto*' || true
           sudo apt-get autoremove -y --purge || true
           sudo apt-get clean
+
           sudo rm -rf \
             /var/lib/docker \
             /var/lib/snapd \
@@ -111,16 +112,19 @@ jobs:
             /usr/local/julia* \
             /usr/share/doc/* \
             /usr/share/man/*
-          # Keep fixed-size out/host (~3.5 GB) and symbols (~3 GB) on local /mnt (14 GB total)
+
+          # Place fixed-size out/host (~3.5 GB) and symbols (~3 GB) on local /mnt (14 GB total)
           mkdir -p /home/runner/out/soong/.intermediates \
             /home/runner/out/target/common \
             "/home/runner/out/target/product/${{ inputs.device }}"
-          sudo mkdir -p /mnt/out_ext/host /mnt/out_ext/symbols
-          sudo chown -R "$USER:$USER" /mnt/out_ext
+          sudo mkdir -p /mnt/out_ext/host /mnt/out_ext/symbols /mnt/prebuilts_ext
+          sudo chown -R "$USER:$USER" /mnt/out_ext /mnt/prebuilts_ext
           ln -sfn /mnt/out_ext/host /home/runner/out/host
           ln -sfn /mnt/out_ext/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
+
           df -h / /mnt
           free -h
+
       - name: Install Minimal Build Dependencies
         run: |
           set -e
@@ -130,190 +134,145 @@ jobs:
             git git-lfs gnupg gperf lib32ncurses-dev lib32readline-dev lib32z1-dev \
             liblz4-tool libncurses6 libncurses-dev libsdl1.2-dev libssl-dev \
             libxml2 libxml2-utils lzop openssh-client pngcrush rsync schedtool \
-            squashfs-tools unzip xsltproc zip zlib1g-dev python-is-python3 zstd sshfs
+            squashfs-tools unzip xsltproc zip zlib1g-dev python-is-python3 zstd
+
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh
+          fi
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
+
           if [ ! -e /usr/lib/x86_64-linux-gnu/libncurses.so.5 ] && [ -e /usr/lib/x86_64-linux-gnu/libncurses.so.6 ]; then
             sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
             sudo ln -s /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5
           fi
+
           mkdir -p ~/.bin
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/.bin/repo
           chmod a+x ~/.bin/repo
           echo "$HOME/.bin" >> "$GITHUB_PATH"
-          
-      - name: Connect Tailscale
-        uses: tailscale/github-action@v2
-        with:
-          authkey: ${{ env.TS_AUTHKEY }}
-          hostname: lineage-builder-bacon
 
-      - name: Mount Storage Host Runner via SSHFS
-        run: |
-          set -e
-          mkdir -p ~/.ssh /tmp/remote_out
-          chmod 700 ~/.ssh
-          if printf '%s' "$SSH_PRIV_KEY" | grep -q "BEGIN"; then
-            printf '%s\n' "$SSH_PRIV_KEY" | tr -d '\r' > ~/.ssh/id_storage
-          else
-            printf '%s' "$SSH_PRIV_KEY" | tr -d ' \n\r\t' | base64 -d > ~/.ssh/id_storage
-          fi
-          chmod 600 ~/.ssh/id_storage
-          cat << 'EOF' > ~/.ssh/config
-          Host *
-            IdentityFile ~/.ssh/id_storage
-            StrictHostKeyChecking no
-            UserKnownHostsFile /dev/null
-            ConnectTimeout 15
-            ServerAliveInterval 15
-            ServerAliveCountMax 4
-          EOF
-          chmod 600 ~/.ssh/config
-          sudo tailscale ping --c 3 --timeout 10s "$STORAGE_HOST" || true
-          DEST="${STORAGE_USER}@${STORAGE_HOST}"
-          CONNECTED=0
-          for attempt in $(seq 1 12); do
-            echo "Waiting for storage host ${DEST}:${STORAGE_PORT} (attempt ${attempt}/12)..."
-            if ssh -p "$STORAGE_PORT" "$DEST" "mkdir -p ${STORAGE_DIR}/cold_offload/out_offload ${STORAGE_DIR}/releases"; then
-              CONNECTED=1
-              break
-            fi
-            sleep 10
-          done
-          if [ "$CONNECTED" -ne 1 ]; then
-            echo "ERROR: Could not connect to ${STORAGE_HOST}. Start 'Storage Host Runner' workflow first!"
-            exit 1
-          fi
-          sudo chmod 666 /dev/fuse 2>/dev/null || true
-          sshfs -p "$STORAGE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=4,compression=no \
-            "${DEST}:${STORAGE_DIR}/cold_offload" /tmp/remote_out
-      - name: Sync LineageOS Source, Clone Trees & Strip .repo/.git Only
+      - name: Sync LineageOS Source & Balance Storage Across / and /mnt
         run: |
           set -e
           mkdir -p ~/android
           cd ~/android
+
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git config --global color.ui false
+
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1 --git-lfs
           repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j"$(nproc)"
+
           mkdir -p device/tcl vendor/tcl
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
-          # Snapshot manifest, then delete ONLY .repo and non-kernel .git dirs (keeps all Android.bp/prebuilts valid)
+
+          # Snapshot manifest, then delete .repo, non-kernel .git, and non-Linux/x86 prebuilts (keeps cts & jdk8 intact)
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
-          rm -rf .repo
+          rm -rf .repo \
+            prebuilts/*/darwin-x86 \
+            prebuilts/*/*/darwin-x86 \
+            prebuilts/*/windows-x86 \
+            prebuilts/*/*/windows-x86 \
+            external/chromium-webview/prebuilt/x86 \
+            external/chromium-webview/prebuilt/x86_64
           find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
+
           mkdir -p .repo/manifests .repo/repo
           cp /tmp/build-manifest-snapshot.xml .repo/manifest.xml
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
+
+          # Offload ~4.3 GB of static prebuilts to local /mnt NVMe so / keeps ~64 GB free
+          for d in \
+            prebuilts/build-tools \
+            prebuilts/rust/linux-x86 \
+            prebuilts/go/linux-x86 \
+            prebuilts/jdk/jdk11 \
+            prebuilts/jdk/jdk17; do
+            if [ -d "$HOME/android/$d" ]; then
+              mkdir -p "/mnt/prebuilts_ext/$(dirname "$d")"
+              mv "$HOME/android/$d" "/mnt/prebuilts_ext/$d"
+              ln -sfn "/mnt/prebuilts_ext/$d" "$HOME/android/$d"
+            fi
+          done
+
           df -h / /mnt
-      - name: Restore Build Checkpoint from Storage Host
-        if: inputs.resume_from_remote
+
+      - name: Restore Build Checkpoint from GitHub Release
+        if: inputs.resume_from_checkpoint
         run: |
           set -e
-          DEST="${STORAGE_USER}@${STORAGE_HOST}"
+          mkdir -p /tmp/ckpt
+
           find ~/android -exec touch -h -t 202001010000 {} +
-          ssh -p "$STORAGE_PORT" "$DEST" "cat ${STORAGE_DIR}/out_checkpoint.tar.zst" \
-            | zstd -d -T0 \
-            | tar -xPf - --overwrite
-          if [ -L /home/runner/out/target/common ]; then
-            rm -f /home/runner/out/target/common
-          fi
-          mkdir -p /home/runner/out/target/common
-          sudo mkdir -p /mnt/out_ext/symbols
+
+          gh release download build-checkpoint \
+            --repo "$STORAGE_REPO" \
+            --dir /tmp/ckpt \
+            --pattern 'out_checkpoint.tar.zst.part_*'
+          cat /tmp/ckpt/out_checkpoint.tar.zst.part_* | zstd -d -T0 | tar -xPf - --overwrite
+          rm -rf /tmp/ckpt
+
+          sudo mkdir -p /mnt/out_ext/host /mnt/out_ext/symbols
           sudo chown -R "$USER:$USER" /mnt/out_ext
-          rm -rf "/home/runner/out/target/product/${{ inputs.device }}/symbols"
+          ln -sfn /mnt/out_ext/host /home/runner/out/host
           ln -sfn /mnt/out_ext/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
+
           df -h / /mnt
-      - name: Build LineageOS (Atomic Offload to Host Runner + Checkpointing)
+
+      - name: Build LineageOS
         run: |
           set +e
           cd ~/android
-          # Atomic background cold-offloader to storage host runner when / drops below 24 GB free
-          (
-            OUT_ROOT="/home/runner/out"
-            DEVICE_OBJ="$OUT_ROOT/target/product/${{ inputs.device }}/obj"
-            DEST="${STORAGE_USER}@${STORAGE_HOST}"
-            while true; do
-              sleep 20
-              ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-              if [ "$ROOT_FREE_GB" -lt 24 ]; then
-                if ! ls /tmp/remote_out >/dev/null 2>&1; then
-                  fusermount -uz /tmp/remote_out 2>/dev/null || true
-                  sshfs -p "$STORAGE_PORT" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=4,compression=no \
-                    "${DEST}:${STORAGE_DIR}/cold_offload" /tmp/remote_out 2>/dev/null || true
-                fi
-                mountpoint -q /tmp/remote_out || continue
-                for base in "$OUT_ROOT/soong/.intermediates" "$OUT_ROOT/target/common/obj" "$DEVICE_OBJ"; do
-                  [ -d "$base" ] || continue
-                  for grp in "$base"/*; do
-                    [ -d "$grp" ] && [ ! -L "$grp" ] || continue
-                    for sub in "$grp"/*; do
-                      [ -d "$sub" ] && [ ! -L "$sub" ] || continue
-                      case "$(basename "$sub")" in
-                        clang|llvm) continue ;;
-                      esac
-                      if [ -z "$(find "$sub" -mmin -6 2>/dev/null | head -n 1)" ]; then
-                        REL="${sub#$OUT_ROOT/}"
-                        DEST_DIR="/tmp/remote_out/out_offload/$REL"
-                        STAGE_DIR="${DEST_DIR}.stage"
-                        mkdir -p "$(dirname "$DEST_DIR")"
-                        rm -rf "$STAGE_DIR" "$DEST_DIR"
-                        if cp -a "$sub" "$STAGE_DIR" 2>/dev/null; then
-                          mv "$STAGE_DIR" "$DEST_DIR"
-                          mv "$sub" "${sub}.old"
-                          ln -s "$DEST_DIR" "$sub"
-                          rm -rf "${sub}.old"
-                          echo "[Cold-Offload] Moved $REL -> storage host (Root free: $(df -BG / | awk 'NR==2 {print $4}'))"
-                        else
-                          rm -rf "$STAGE_DIR"
-                        fi
-                        ROOT_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
-                        [ "$ROOT_FREE_GB" -ge 30 ] && break 3
-                      fi
-                    done
-                  done
-                done
-              fi
-            done
-          ) &
-          OFFLOAD_PID=$!
-          timeout --signal=TERM 285m bash -c '
+
+          timeout --signal=TERM 295m bash -c '
             set -e
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
+
             df -h / /mnt
             free -h
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?
-          kill "$OFFLOAD_PID" 2>/dev/null || true
+
           set -e
           if [ "$BUILD_EXIT" -eq 0 ]; then
             echo "Build completed successfully!"
             exit 0
           elif [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 143 ]; then
-            echo "Build reached 4h45m safety limit. Streaming checkpoint to storage host runner..."
-            DEST="${STORAGE_USER}@${STORAGE_HOST}"
+            echo "Build reached 4h55m safety limit. Streaming checkpoint chunks to GitHub Release..."
+            mkdir -p /tmp/ckpt
+            gh release delete build-checkpoint --repo "$STORAGE_REPO" --yes --cleanup-tag || true
+            gh release create build-checkpoint \
+              --repo "$STORAGE_REPO" \
+              --prerelease \
+              --title "LineageOS 20.0 Build Checkpoint" \
+              --notes "Auto-generated build checkpoint"
+
+            set -o pipefail
             tar -cPf - /home/runner/out /mnt/out_ext \
               | zstd -3 -T0 \
-              | ssh -p "$STORAGE_PORT" "$DEST" "cat > ${STORAGE_DIR}/out_checkpoint.tar.zst"
-            echo "Checkpoint saved on storage host."
+              | split -b 1900M --filter='cat > /tmp/ckpt/$FILE && gh release upload build-checkpoint /tmp/ckpt/$FILE --repo "$STORAGE_REPO" && rm -f /tmp/ckpt/$FILE' - out_checkpoint.tar.zst.part_
+
+            echo "Checkpoint saved. Re-run with resume_from_checkpoint=true."
             exit 1
           else
             echo "Build failed with exit code $BUILD_EXIT"
             exit "$BUILD_EXIT"
           fi
-      - name: Upload Finished Images to GitHub Release & Storage Host
+
+      - name: Upload Finished Images to GitHub Release
         if: success()
         run: |
           set -e
           PRODUCT_OUT="/home/runner/out/target/product/${{ inputs.device }}"
           RELEASE_TAG="lineage-20-${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
-          DEST="${STORAGE_USER}@${STORAGE_HOST}"
           ASSETS=()
+
           shopt -s nullglob
           ASSETS+=( "$PRODUCT_OUT"/lineage-*.zip )
           ASSETS+=( "$PRODUCT_OUT"/boot.img )
@@ -321,12 +280,13 @@ jobs:
           ASSETS+=( "$PRODUCT_OUT"/vendor.img )
           ASSETS+=( "$PRODUCT_OUT"/recovery.img )
           shopt -u nullglob
+
           if [ "${#ASSETS[@]}" -gt 0 ]; then
-            scp -P "$STORAGE_PORT" "${ASSETS[@]}" "${DEST}:${STORAGE_DIR}/releases/" || true
             gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
-              --repo "${{ github.repository }}" \
+              --repo "$STORAGE_REPO" \
               --title "$RELEASE_TAG"
           fi
+
       - name: Upload GitHub Actions Artifacts
         if: success()
         uses: actions/upload-artifact@v4
@@ -339,4 +299,3 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
-            

@@ -222,9 +222,15 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot manifest, then delete .repo and non-kernel .git dirs
+          # Snapshot manifest, then delete .repo, non-kernel .git, and non-Linux/x86 prebuilts (~57 GB freed locally)
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
-          rm -rf .repo
+          rm -rf .repo \
+            prebuilts/*/darwin-x86 \
+            prebuilts/*/*/darwin-x86 \
+            prebuilts/*/windows-x86 \
+            prebuilts/*/*/windows-x86 \
+            external/chromium-webview/prebuilt/x86 \
+            external/chromium-webview/prebuilt/x86_64
           find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
 
           mkdir -p .repo/manifests .repo/repo
@@ -232,21 +238,19 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
-          # Stream ~25 GB of read-only prebuilts to storage host and bind-mount back
+          # Stream ~15 GB of heavy read-only assets with zstd compression (~5 GB over wire -> ~12 min)
           DEST="${STORAGE_USER}@${STORAGE_IP}"
           OFFLOAD_DIRS=(
             prebuilts/sdk
-            prebuilts/gcc
-            prebuilts/rust
             prebuilts/misc
-            prebuilts/go
-            prebuilts/jdk
             external/chromium-webview
           )
 
-          echo "Streaming read-only prebuilts to storage host (${STORAGE_IP})..."
+          echo "Streaming compressed read-only prebuilts to storage host (${STORAGE_IP})..."
+          set -o pipefail
           tar -cf - -C ~/android "${OFFLOAD_DIRS[@]}" \
-            | ssh -p "$STORAGE_PORT" "$DEST" "rm -rf ${STORAGE_DIR}/src_offload/* && tar -xf - -C ${STORAGE_DIR}/src_offload"
+            | zstd -1 -T0 \
+            | ssh -p "$STORAGE_PORT" "$DEST" "rm -rf ${STORAGE_DIR}/src_offload/* && zstd -d -T0 | tar -xf - -C ${STORAGE_DIR}/src_offload"
 
           grep -qxF 'user_allow_other' /etc/fuse.conf 2>/dev/null || echo 'user_allow_other' | sudo tee -a /etc/fuse.conf >/dev/null
           sudo chmod 666 /dev/fuse 2>/dev/null || true

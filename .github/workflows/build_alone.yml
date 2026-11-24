@@ -185,7 +185,7 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
-          # Offload ~4.3 GB of static prebuilts to local /mnt NVMe so / keeps ~64 GB free
+          # Offload ~3.5 GB of static prebuilts to local /mnt NVMe via bind mounts so Soong scans their Android.bp files
           for d in \
             prebuilts/build-tools \
             prebuilts/rust/linux-x86 \
@@ -195,9 +195,11 @@ jobs:
             if [ -d "$HOME/android/$d" ]; then
               mkdir -p "/mnt/prebuilts_ext/$(dirname "$d")"
               mv "$HOME/android/$d" "/mnt/prebuilts_ext/$d"
-              ln -sfn "/mnt/prebuilts_ext/$d" "$HOME/android/$d"
+              mkdir -p "$HOME/android/$d"
+              sudo mount --bind "/mnt/prebuilts_ext/$d" "$HOME/android/$d"
             fi
           done
+
 
           df -h / /mnt
 

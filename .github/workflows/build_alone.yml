@@ -52,7 +52,7 @@ env:
   PRODUCT_MINIMIZE_JAVA_DEBUG_INFO: "true"
   ART_BUILD_TARGET_DEBUG: "false"
   ART_BUILD_HOST_DEBUG: "false"
-  GOGC: "40"
+  GOGC: "80"
   _JAVA_OPTIONS: "-Xmx6g"
 
 jobs:
@@ -237,6 +237,7 @@ jobs:
 
             df -h / /mnt
             free -h
+            mka -j2 nothing
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?

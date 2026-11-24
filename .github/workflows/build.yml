@@ -53,7 +53,6 @@ env:
   ART_BUILD_HOST_DEBUG: "false"
   GOGC: "40"
   _JAVA_OPTIONS: "-Xmx6g"
-  STORAGE_HOST: "lineage-storage-host"
   STORAGE_USER: "runner"
   STORAGE_PORT: "8022"
   STORAGE_DIR: "/home/runner/lineage_out"
@@ -156,7 +155,7 @@ jobs:
           authkey: ${{ env.TS_AUTHKEY }}
           hostname: lineage-builder
 
-      - name: Verify SSH Connection to Storage Host Runner
+      - name: Discover Storage Host IP & Verify SSH
         run: |
           set -e
           mkdir -p ~/.ssh /tmp/remote_src
@@ -174,28 +173,35 @@ jobs:
             IdentityFile ~/.ssh/id_storage
             StrictHostKeyChecking no
             UserKnownHostsFile /dev/null
-            ConnectTimeout 15
+            ConnectTimeout 20
             ServerAliveInterval 15
             ServerAliveCountMax 4
             Ciphers aes128-gcm@openssh.com
           EOF
           chmod 600 ~/.ssh/config
 
-          sudo tailscale ping --c 3 --timeout 10s "$STORAGE_HOST" || true
+          echo "Current Tailscale peers:"
+          tailscale status
 
-          DEST="${STORAGE_USER}@${STORAGE_HOST}"
           CONNECTED=0
-          for attempt in $(seq 1 12); do
-            echo "Waiting for storage host ${DEST}:${STORAGE_PORT} (attempt ${attempt}/12)..."
-            if ssh -p "$STORAGE_PORT" "$DEST" "mkdir -p ${STORAGE_DIR}/src_offload ${STORAGE_DIR}/releases"; then
-              CONNECTED=1
-              break
+          for attempt in $(seq 1 18); do
+            STORAGE_IP=$(tailscale status | awk '/lineage-storage-host/ && $0 !~ /offline/ {print $1; exit}')
+            if [ -n "$STORAGE_IP" ]; then
+              echo "Testing SSH to active storage host ${STORAGE_USER}@${STORAGE_IP}:${STORAGE_PORT} (attempt ${attempt}/18)..."
+              sudo tailscale ping --c 3 --timeout 10s "$STORAGE_IP" || true
+              if ssh -p "$STORAGE_PORT" "${STORAGE_USER}@${STORAGE_IP}" "mkdir -p ${STORAGE_DIR}/src_offload ${STORAGE_DIR}/releases"; then
+                echo "STORAGE_IP=$STORAGE_IP" >> "$GITHUB_ENV"
+                CONNECTED=1
+                break
+              fi
+            else
+              echo "Waiting for an online lineage-storage-host node in Tailscale (attempt ${attempt}/18)..."
             fi
             sleep 10
           done
 
           if [ "$CONNECTED" -ne 1 ]; then
-            echo "ERROR: Could not connect to ${STORAGE_HOST}. Start 'Storage Host Runner' workflow first!"
+            echo "ERROR: Could not reach any online lineage-storage-host node. Ensure 'Storage Host Runner' is running and TS_AUTHKEY is Reusable."
             exit 1
           fi
 
@@ -226,8 +232,8 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
-          # Stream ~25 GB of read-only prebuilts to storage host and bind-mount back (keeps 100% of out/ on local NVMe)
-          DEST="${STORAGE_USER}@${STORAGE_HOST}"
+          # Stream ~25 GB of read-only prebuilts to storage host and bind-mount back
+          DEST="${STORAGE_USER}@${STORAGE_IP}"
           OFFLOAD_DIRS=(
             prebuilts/sdk
             prebuilts/gcc
@@ -238,7 +244,7 @@ jobs:
             external/chromium-webview
           )
 
-          echo "Streaming read-only prebuilts to storage host..."
+          echo "Streaming read-only prebuilts to storage host (${STORAGE_IP})..."
           tar -cf - -C ~/android "${OFFLOAD_DIRS[@]}" \
             | ssh -p "$STORAGE_PORT" "$DEST" "rm -rf ${STORAGE_DIR}/src_offload/* && tar -xf - -C ${STORAGE_DIR}/src_offload"
 
@@ -260,7 +266,7 @@ jobs:
         if: inputs.resume_from_remote
         run: |
           set -e
-          DEST="${STORAGE_USER}@${STORAGE_HOST}"
+          DEST="${STORAGE_USER}@${STORAGE_IP}"
           find ~/android -xdev -exec touch -h -t 202001010000 {} +
 
           ssh -p "$STORAGE_PORT" "$DEST" "cat ${STORAGE_DIR}/out_checkpoint.tar.zst" \
@@ -301,7 +307,7 @@ jobs:
             exit 0
           elif [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 143 ]; then
             echo "Build reached 4h45m safety limit. Streaming checkpoint to storage host runner..."
-            DEST="${STORAGE_USER}@${STORAGE_HOST}"
+            DEST="${STORAGE_USER}@${STORAGE_IP}"
             tar -cPf - /home/runner/out /mnt/out_ext \
               | zstd -3 -T0 \
               | ssh -p "$STORAGE_PORT" "$DEST" "cat > ${STORAGE_DIR}/out_checkpoint.tar.zst"
@@ -318,7 +324,7 @@ jobs:
           set -e
           PRODUCT_OUT="/home/runner/out/target/product/${{ inputs.device }}"
           RELEASE_TAG="lineage-20-${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
-          DEST="${STORAGE_USER}@${STORAGE_HOST}"
+          DEST="${STORAGE_USER}@${STORAGE_IP}"
           ASSETS=()
 
           shopt -s nullglob
@@ -348,3 +354,8 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
+
+      - name: Disconnect Tailscale on Exit
+        if: always()
+        run: sudo tailscale logout || true
+        

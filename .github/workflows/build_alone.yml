@@ -191,13 +191,13 @@ jobs:
             external/chromium-webview/prebuilt/x86_64
           find . -name ".git" -prune -exec rm -rf {} +
 
-          # Remove unreferenced older Clang toolchains (~5-7 GB freed) while keeping active clang-r450784d
-          REFERENCED_CLANGS=$(grep -rhoE 'clang-r[0-9a-zA-Z_-]+' build/ device/ vendor/ kernel/ 2>/dev/null | sort -u || true)
+          # Remove unreferenced older Clang toolchains (~4-5 GB freed) while keeping clang-r450784d and RenderScript's clang-3289846
+          REFERENCED_CLANGS=$(grep -rhoE 'clang-[0-9a-zA-Z_-]+' build/ device/ vendor/ kernel/ 2>/dev/null | sort -u || true)
           for cdir in prebuilts/clang/host/linux-x86/clang-*; do
             [ -d "$cdir" ] || continue
             cname=$(basename "$cdir")
             case "$cname" in
-              clang-r450784*|clang-stable) continue ;;
+              clang-r450784*|clang-3289846*|clang-stable) continue ;;
             esac
             if ! printf '%s\n' "$REFERENCED_CLANGS" | grep -qxF "$cname"; then
               if [ -z "$(find "$cdir" -name 'Android.bp' -print -quit)" ]; then

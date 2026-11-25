@@ -1,4 +1,4 @@
-name: Build LineageOS 20.0(alone)
+name: Build LineageOS 20.0(alo)
 
 on:
   workflow_dispatch:
@@ -187,6 +187,7 @@ jobs:
             prebuilts/*/windows-x86 \
             prebuilts/*/*/windows-x86 \
             prebuilts/gcc/linux-x86/x86 \
+            prebuilts/gcc/linux-x86/mips \
             external/chromium-webview/prebuilt/x86 \
             external/chromium-webview/prebuilt/x86_64
           find . -name ".git" -prune -exec rm -rf {} +
@@ -212,7 +213,7 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
-          # Offload static prebuilts to /mnt via bind mounts while keeping 6.2 GB reserved on /mnt for out/host
+          # Offload static prebuilts to /mnt via bind mounts while keeping 5.0 GB reserved on /mnt for out/host (~4.4 GB)
           for d in \
             prebuilts/build-tools \
             prebuilts/misc \
@@ -223,11 +224,12 @@ jobs:
             prebuilts/go/linux-x86 \
             prebuilts/jdk/jdk11 \
             prebuilts/jdk/jdk17 \
-            external/chromium-webview/prebuilt/arm; do
+            external/chromium-webview/prebuilt/arm \
+            external/chromium-webview/prebuilt/arm64; do
             if [ -d "$HOME/android/$d" ]; then
               DIR_KB=$(du -sk "$HOME/android/$d" | awk '{print $1}')
               MNT_FREE_KB=$(df -Pk /mnt | awk 'NR==2 {print $4}')
-              if [ $((MNT_FREE_KB - DIR_KB)) -gt 6200000 ]; then
+              if [ $((MNT_FREE_KB - DIR_KB)) -gt 5000000 ]; then
                 mkdir -p "/mnt/prebuilts_ext/$(dirname "$d")"
                 mv "$HOME/android/$d" "/mnt/prebuilts_ext/$d"
                 mkdir -p "$HOME/android/$d"
@@ -266,19 +268,30 @@ jobs:
           set +e
           cd ~/android
 
-          # Prune symbols, truncate non-NDK stripped unstripped/* files, and reclaim old .o/.a if / drops below 8 GB
+          # Safely prune write-only symbols, stripped non-NDK unstripped/* files, and Make LINKED/* copies (never touches .o/.a)
           (
             SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
             OBJ_DIR="/home/runner/out/target/product/${{ inputs.device }}/obj"
             SOONG_INT="/home/runner/out/soong/.intermediates"
             while true; do
-              sleep 15
+              sleep 20
               find "$SYM_DIR" -type f -delete 2>/dev/null || true
 
-              find "$SOONG_INT" -path '*/unstripped/*' -type f -size +1M -mmin +2 2>/dev/null | while IFS= read -r f; do
+              # Truncate Make's unstripped obj/*_intermediates/LINKED/* copies once parent stripped binary exists
+              find "$OBJ_DIR" -path '*/LINKED/*' -type f -size +512k -mmin +3 2>/dev/null | while IFS= read -r f; do
+                BASE=$(basename "$f")
+                INTER_DIR=$(dirname "$(dirname "$f")")
+                if [ -s "$INTER_DIR/$BASE" ]; then
+                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+                  truncate -s 0 "$f" 2>/dev/null || continue
+                  touch -d "@$MTIME" "$f" 2>/dev/null || true
+                fi
+              done
+
+              # Truncate Soong's unstripped/* binaries once stripped output exists (skipping *.ndk modules needed by abidw)
+              find "$SOONG_INT" -path '*/unstripped/*' -type f -size +1M -mmin +3 2>/dev/null | while IFS= read -r f; do
                 BASE=$(basename "$f")
                 STEM="${BASE%.*}"
-                # Keep unstripped binaries that belong to *.ndk modules (required by abidw)
                 if [ -n "$(find "$SOONG_INT" -maxdepth 6 -type d -name "${STEM}.ndk" -print -quit 2>/dev/null)" ]; then
                   continue
                 fi
@@ -289,21 +302,6 @@ jobs:
                   touch -d "@$MTIME" "$f" 2>/dev/null || true
                 fi
               done
-
-              FREE_KB=$(df -Pk / | awk 'NR==2 {print $4}')
-              if [ "${FREE_KB:-0}" -lt 8000000 ]; then
-                find "$SOONG_INT" -path '*/obj/*' \( -name '*.o' -o -name '*.a' \) -type f -size +256k -mmin +15 2>/dev/null | while IFS= read -r f; do
-                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
-                  truncate -s 0 "$f" 2>/dev/null || continue
-                  touch -d "@$MTIME" "$f" 2>/dev/null || true
-                done
-                find "$OBJ_DIR/STATIC_LIBRARIES" "$OBJ_DIR/OBJECT_LIBRARIES" \( -name '*.o' -o -name '*.a' \) -type f -size +256k -mmin +15 2>/dev/null | while IFS= read -r f; do
-                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
-                  truncate -s 0 "$f" 2>/dev/null || continue
-                  touch -d "@$MTIME" "$f" 2>/dev/null || true
-                done
-                find /home/runner/out/soong/.temp -mindepth 1 -maxdepth 1 -mmin +20 -exec rm -rf {} + 2>/dev/null || true
-              fi
             done
           ) &
           SYM_PRUNE_PID=$!

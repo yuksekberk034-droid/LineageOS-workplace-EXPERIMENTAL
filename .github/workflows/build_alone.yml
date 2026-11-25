@@ -1,4 +1,4 @@
-name: Build LineageOS 20.0 (alone)
+name: Build LineageOS 20.0
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         default: "8492A"
         type: string
       device:
-        description: "Device codename / PRODUCT_DEVICE"
+        description: "Device codename / PRODUCT_DEVICE (matches device/tcl/<device>)"
         required: true
         default: "Freyr_10_1_WiFi"
         type: string
@@ -111,16 +111,16 @@ jobs:
             /usr/local/aws-sam-cli \
             /usr/local/julia* \
             /usr/share/doc/* \
-            /usr/share/man/*
+            /usr/share/man/* \
+            /usr/share/locale/*
 
-          # Place fixed-size out/host (~3.5 GB) and symbols (~3 GB) on local /mnt (14 GB total)
+          # Place fixed-size out/host (~4.3 GB) on /mnt (14 GB total), keep symbols on / where they get pruned
           mkdir -p /home/runner/out/soong/.intermediates \
             /home/runner/out/target/common \
-            "/home/runner/out/target/product/${{ inputs.device }}"
-          sudo mkdir -p /mnt/out_ext/host /mnt/out_ext/symbols /mnt/prebuilts_ext
+            "/home/runner/out/target/product/${{ inputs.device }}/symbols"
+          sudo mkdir -p /mnt/out_ext/host /mnt/prebuilts_ext
           sudo chown -R "$USER:$USER" /mnt/out_ext /mnt/prebuilts_ext
           ln -sfn /mnt/out_ext/host /home/runner/out/host
-          ln -sfn /mnt/out_ext/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
 
           df -h / /mnt
           free -h
@@ -140,7 +140,7 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh
           fi
           sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
+          sudo rm -rf /var/lib/apt/lists/* /var/log/* /home/runner/.cache/*
 
           if [ ! -e /usr/lib/x86_64-linux-gnu/libncurses.so.5 ] && [ -e /usr/lib/x86_64-linux-gnu/libncurses.so.6 ]; then
             sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
@@ -185,9 +185,10 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
-          # Offload ~3.5 GB of static prebuilts to local /mnt NVMe via bind mounts so Soong scans their Android.bp files
+          # Offload ~5.6 GB of static prebuilts to local /mnt NVMe via bind mounts so Soong scans their Android.bp files
           for d in \
             prebuilts/build-tools \
+            prebuilts/misc \
             prebuilts/rust/linux-x86 \
             prebuilts/go/linux-x86 \
             prebuilts/jdk/jdk11 \
@@ -199,7 +200,6 @@ jobs:
               sudo mount --bind "/mnt/prebuilts_ext/$d" "$HOME/android/$d"
             fi
           done
-
 
           df -h / /mnt
 
@@ -218,10 +218,12 @@ jobs:
           cat /tmp/ckpt/out_checkpoint.tar.zst.part_* | zstd -d -T0 | tar -xPf - --overwrite
           rm -rf /tmp/ckpt
 
-          sudo mkdir -p /mnt/out_ext/host /mnt/out_ext/symbols
+          # Drop extracted unstripped symbols (~5 GB) so /mnt keeps ~4 GB free and / gains ~6 GB headroom
+          sudo mkdir -p /mnt/out_ext/host
           sudo chown -R "$USER:$USER" /mnt/out_ext
+          rm -rf /mnt/out_ext/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols" /home/runner/out/soong/.temp/*
+          mkdir -p "/home/runner/out/target/product/${{ inputs.device }}/symbols"
           ln -sfn /mnt/out_ext/host /home/runner/out/host
-          ln -sfn /mnt/out_ext/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols"
 
           df -h / /mnt
 
@@ -229,6 +231,16 @@ jobs:
         run: |
           set +e
           cd ~/android
+
+          # Continuously prune write-only unstripped symbols so neither / nor /mnt fills up
+          (
+            SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
+            while true; do
+              sleep 30
+              find "$SYM_DIR" -type f -delete 2>/dev/null || true
+            done
+          ) &
+          SYM_PRUNE_PID=$!
 
           timeout --signal=TERM 295m bash -c '
             set -e
@@ -241,6 +253,7 @@ jobs:
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?
+          kill "$SYM_PRUNE_PID" 2>/dev/null || true
 
           set -e
           if [ "$BUILD_EXIT" -eq 0 ]; then

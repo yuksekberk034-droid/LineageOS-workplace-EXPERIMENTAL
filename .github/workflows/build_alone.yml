@@ -1,4 +1,4 @@
-name: Build LineageOS 20.0
+name: Build LineageOS 20.0a
 
 on:
   workflow_dispatch:
@@ -213,7 +213,7 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
-          # Offload static prebuilts to /mnt via bind mounts while keeping 5.0 GB reserved on /mnt for out/host (~4.4 GB)
+          # Offload static prebuilts to /mnt via bind mounts while keeping 4.65 GB reserved on /mnt for out/host (~4.35 GB)
           for d in \
             prebuilts/build-tools \
             prebuilts/misc \
@@ -224,12 +224,14 @@ jobs:
             prebuilts/go/linux-x86 \
             prebuilts/jdk/jdk11 \
             prebuilts/jdk/jdk17 \
+            prebuilts/gcc/linux-x86/aarch64 \
+            prebuilts/gcc/linux-x86/arm \
             external/chromium-webview/prebuilt/arm \
             external/chromium-webview/prebuilt/arm64; do
             if [ -d "$HOME/android/$d" ]; then
               DIR_KB=$(du -sk "$HOME/android/$d" | awk '{print $1}')
               MNT_FREE_KB=$(df -Pk /mnt | awk 'NR==2 {print $4}')
-              if [ $((MNT_FREE_KB - DIR_KB)) -gt 5000000 ]; then
+              if [ $((MNT_FREE_KB - DIR_KB)) -gt 4650000 ]; then
                 mkdir -p "/mnt/prebuilts_ext/$(dirname "$d")"
                 mv "$HOME/android/$d" "/mnt/prebuilts_ext/$d"
                 mkdir -p "$HOME/android/$d"
@@ -261,6 +263,26 @@ jobs:
           mkdir -p "/home/runner/out/target/product/${{ inputs.device }}/symbols"
           ln -sfn /mnt/out_ext/host /home/runner/out/host
 
+          # Immediately reclaim ~6-8 GB from already-stripped C/C++ unstripped/* files restored from the checkpoint
+          SOONG_INT="/home/runner/out/soong/.intermediates"
+          NDK_STEMS=$(find "$SOONG_INT" -type d -name '*.ndk' 2>/dev/null | sed 's|.*/||; s|\.ndk$||' | sort -u)
+          find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +512k 2>/dev/null | while IFS= read -r f; do
+            BASE=$(basename "$f")
+            STEM="${BASE%.*}"
+            case "$STEM" in
+              libc|libm|libdl|liblog|libz|libstdc++|libEGL|libGLESv1_CM|libGLESv2|libGLESv3|libvulkan|libOpenSLES|libOpenMAXAL|libandroid|libjnigraphics|libmediandk|libcamera2ndk|libaaudio|libamidi|libbinder_ndk|libnativehelper|libnativewindow|libneuralnetworks|libsync|libicu) continue ;;
+            esac
+            if printf '%s\n' "$NDK_STEMS" | grep -qxF "$STEM"; then
+              continue
+            fi
+            VARIANT_DIR=$(dirname "$(dirname "$f")")
+            if [ -s "$VARIANT_DIR/$BASE" ] || [ -s "$VARIANT_DIR/stripped/$BASE" ]; then
+              MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+              truncate -s 0 "$f" 2>/dev/null || continue
+              touch -d "@$MTIME" "$f" 2>/dev/null || true
+            fi
+          done
+
           df -h / /mnt
 
       - name: Build LineageOS
@@ -268,7 +290,7 @@ jobs:
           set +e
           cd ~/android
 
-          # Safely truncate symbols AFTER symbols_map writes .textproto, plus Make LINKED/* and host unstripped/*
+          # Safely truncate completed symbols (after .textproto exists), Make LINKED/*, and non-NDK/non-Rust unstripped/*
           (
             SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
             OBJ_DIR="/home/runner/out/target/product/${{ inputs.device }}/obj"
@@ -298,9 +320,17 @@ jobs:
                 fi
               done
 
-              # Truncate host linux_glibc*/unstripped/* binaries only (never touches target android_* unstripped files)
-              find "$SOONG_INT" -path '*linux_glibc*/unstripped/*' -type f -size +1M -mmin +3 2>/dev/null | while IFS= read -r f; do
+              # Truncate Soong's C/C++ unstripped/* binaries >3m old once stripped output exists (never touches NDK or Rust)
+              NDK_STEMS=$(find "$SOONG_INT" -type d -name '*.ndk' 2>/dev/null | sed 's|.*/||; s|\.ndk$||' | sort -u)
+              find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +512k -mmin +3 2>/dev/null | while IFS= read -r f; do
                 BASE=$(basename "$f")
+                STEM="${BASE%.*}"
+                case "$STEM" in
+                  libc|libm|libdl|liblog|libz|libstdc++|libEGL|libGLESv1_CM|libGLESv2|libGLESv3|libvulkan|libOpenSLES|libOpenMAXAL|libandroid|libjnigraphics|libmediandk|libcamera2ndk|libaaudio|libamidi|libbinder_ndk|libnativehelper|libnativewindow|libneuralnetworks|libsync|libicu) continue ;;
+                esac
+                if printf '%s\n' "$NDK_STEMS" | grep -qxF "$STEM"; then
+                  continue
+                fi
                 VARIANT_DIR=$(dirname "$(dirname "$f")")
                 if [ -s "$VARIANT_DIR/$BASE" ] || [ -s "$VARIANT_DIR/stripped/$BASE" ]; then
                   MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue

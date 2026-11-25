@@ -1,4 +1,4 @@
-name: Build LineageOS 20.0 (alone)
+name: Build LineageOS 20.0 (alon)
 
 on:
   workflow_dispatch:
@@ -179,16 +179,33 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot manifest, then delete .repo, all .git dirs, and non-Linux/x86 prebuilts
+          # Snapshot manifest, then delete .repo, all .git dirs, and non-Linux/ARM prebuilts (keeps vndk & cts intact)
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo \
             prebuilts/*/darwin-x86 \
             prebuilts/*/*/darwin-x86 \
             prebuilts/*/windows-x86 \
             prebuilts/*/*/windows-x86 \
+            prebuilts/gcc/linux-x86/x86 \
             external/chromium-webview/prebuilt/x86 \
             external/chromium-webview/prebuilt/x86_64
           find . -name ".git" -prune -exec rm -rf {} +
+
+          # Remove unreferenced older Clang toolchains while keeping clang-r450784d and RenderScript's clang-3289846
+          REFERENCED_CLANGS=$(grep -rhoE 'clang-[0-9a-zA-Z_-]+' build/ device/ vendor/ kernel/ 2>/dev/null | sort -u || true)
+          for cdir in prebuilts/clang/host/linux-x86/clang-*; do
+            [ -d "$cdir" ] || continue
+            cname=$(basename "$cdir")
+            case "$cname" in
+              clang-r450784*|clang-3289846*|clang-stable) continue ;;
+            esac
+            if ! printf '%s\n' "$REFERENCED_CLANGS" | grep -qxF "$cname"; then
+              if [ -z "$(find "$cdir" -name 'Android.bp' -print -quit)" ]; then
+                echo "Removing unreferenced Clang toolchain: $cdir"
+                rm -rf "$cdir"
+              fi
+            fi
+          done
 
           mkdir -p .repo/manifests .repo/repo
           cp /tmp/build-manifest-snapshot.xml .repo/manifest.xml
@@ -249,18 +266,17 @@ jobs:
           set +e
           cd ~/android
 
-          # Prune write-only symbols and truncate already-stripped unstripped/*.so binaries (preserving mtime)
+          # Prune write-only symbols and truncate already-stripped unstripped/* binaries (preserving mtime)
           (
             SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
             SOONG_INT="/home/runner/out/soong/.intermediates"
             while true; do
               sleep 20
               find "$SYM_DIR" -type f -delete 2>/dev/null || true
-              find "$SOONG_INT" -path '*/unstripped/*' -type f -size +1M -mmin +2 2>/dev/null | while IFS= read -r f; do
+              find "$SOONG_INT" -path '*/unstripped/*' -type f -size +1M -mmin +3 2>/dev/null | while IFS= read -r f; do
                 BASE=$(basename "$f")
                 VARIANT_DIR=$(dirname "$(dirname "$f")")
-                STRIPPED="$VARIANT_DIR/stripped/$BASE"
-                if [ -s "$STRIPPED" ]; then
+                if [ -s "$VARIANT_DIR/$BASE" ]; then
                   MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
                   truncate -s 0 "$f" 2>/dev/null || continue
                   touch -d "@$MTIME" "$f" 2>/dev/null || true
@@ -275,25 +291,9 @@ jobs:
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
 
-            mka -j2 nothing
-
-            # Now that build.ninja is generated, safely delete unbuilt test/toolchain trees (~11 GB freed)
-            rm -rf \
-              cts/tests \
-              test/vts* test/cts* test/mts* \
-              prebuilts/gcc/linux-x86/x86 \
-              prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30
-
-            for cdir in prebuilts/clang/host/linux-x86/clang-*; do
-              [ -d "$cdir" ] || continue
-              case "$(basename "$cdir")" in
-                clang-r450784*|clang-3289846*|clang-stable) continue ;;
-              esac
-              rm -rf "$cdir"
-            done
-
             df -h / /mnt
             free -h
+            mka -j2 nothing
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?

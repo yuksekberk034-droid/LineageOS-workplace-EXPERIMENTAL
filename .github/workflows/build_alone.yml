@@ -1,4 +1,4 @@
-name: Build LineageOS 20.0
+name: Build LineageOS 20.0 (alone)
 
 on:
   workflow_dispatch:
@@ -79,7 +79,7 @@ jobs:
           sudo swapon -p 100 /dev/zram0
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
-            'temurin-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \
+            'temurin-*' 'openjdk-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \
             'azure-cli' 'google-cloud-cli' 'powershell' 'dotnet*' 'mono-*' \
             'llvm-*' 'clang-*' 'mysql-*' 'postgresql-*' 'php*' 'ruby*' \
             'snapd' 'apport*' 'man-db' 'fonts-noto*' || true
@@ -97,13 +97,21 @@ jobs:
             /opt/az \
             /opt/microsoft \
             /opt/google \
+            /opt/pipx \
             /usr/share/miniconda \
             /usr/share/swift \
             /usr/share/rustup \
+            /usr/share/gradle* \
+            /usr/share/maven* \
+            /usr/share/ant* \
+            /usr/share/sbt* \
+            /usr/share/kotlinc* \
+            /usr/lib/jvm/* \
             /usr/local/cargo \
             /usr/local/.ghcup \
             /usr/local/share/boost \
             /usr/local/share/chromium \
+            /usr/local/share/edge_driver \
             /usr/local/share/powershell \
             /usr/local/share/vcpkg \
             /usr/local/lib/node_modules \
@@ -112,7 +120,10 @@ jobs:
             /usr/local/julia* \
             /usr/share/doc/* \
             /usr/share/man/* \
-            /usr/share/locale/*
+            /usr/share/locale/* \
+            /usr/share/icons/* \
+            /usr/share/themes/* \
+            /usr/share/sounds/*
 
           # Place fixed-size out/host (~4.3 GB) on /mnt (14 GB total), keep symbols on / where they get pruned
           mkdir -p /home/runner/out/soong/.intermediates \
@@ -169,7 +180,7 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot manifest, then delete .repo, non-kernel .git, and non-Linux/x86 prebuilts (keeps cts & jdk8 intact)
+          # Snapshot manifest, then delete .repo, all .git dirs, and non-Linux/x86 prebuilts
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo \
             prebuilts/*/darwin-x86 \
@@ -178,26 +189,50 @@ jobs:
             prebuilts/*/*/windows-x86 \
             external/chromium-webview/prebuilt/x86 \
             external/chromium-webview/prebuilt/x86_64
-          find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
+          find . -name ".git" -prune -exec rm -rf {} +
+
+          # Remove unreferenced older Clang toolchains (~5-7 GB freed) while keeping active clang-r450784d
+          REFERENCED_CLANGS=$(grep -rhoE 'clang-r[0-9a-zA-Z_-]+' build/ device/ vendor/ kernel/ 2>/dev/null | sort -u || true)
+          for cdir in prebuilts/clang/host/linux-x86/clang-*; do
+            [ -d "$cdir" ] || continue
+            cname=$(basename "$cdir")
+            case "$cname" in
+              clang-r450784*|clang-stable) continue ;;
+            esac
+            if ! printf '%s\n' "$REFERENCED_CLANGS" | grep -qxF "$cname"; then
+              if [ -z "$(find "$cdir" -name 'Android.bp' -print -quit)" ]; then
+                echo "Removing unreferenced Clang toolchain: $cdir"
+                rm -rf "$cdir"
+              fi
+            fi
+          done
 
           mkdir -p .repo/manifests .repo/repo
           cp /tmp/build-manifest-snapshot.xml .repo/manifest.xml
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
-          # Offload ~5.6 GB of static prebuilts to local /mnt NVMe via bind mounts so Soong scans their Android.bp files
+          # Offload static prebuilts to /mnt via bind mounts while keeping 5.5 GB reserved on /mnt for out/host
           for d in \
             prebuilts/build-tools \
             prebuilts/misc \
+            prebuilts/clang-tools \
+            prebuilts/r8 \
+            prebuilts/tools \
             prebuilts/rust/linux-x86 \
             prebuilts/go/linux-x86 \
             prebuilts/jdk/jdk11 \
-            prebuilts/jdk/jdk17; do
+            prebuilts/jdk/jdk17 \
+            external/chromium-webview/prebuilt/arm; do
             if [ -d "$HOME/android/$d" ]; then
-              mkdir -p "/mnt/prebuilts_ext/$(dirname "$d")"
-              mv "$HOME/android/$d" "/mnt/prebuilts_ext/$d"
-              mkdir -p "$HOME/android/$d"
-              sudo mount --bind "/mnt/prebuilts_ext/$d" "$HOME/android/$d"
+              DIR_KB=$(du -sk "$HOME/android/$d" | awk '{print $1}')
+              MNT_FREE_KB=$(df -Pk /mnt | awk 'NR==2 {print $4}')
+              if [ $((MNT_FREE_KB - DIR_KB)) -gt 5500000 ]; then
+                mkdir -p "/mnt/prebuilts_ext/$(dirname "$d")"
+                mv "$HOME/android/$d" "/mnt/prebuilts_ext/$d"
+                mkdir -p "$HOME/android/$d"
+                sudo mount --bind "/mnt/prebuilts_ext/$d" "$HOME/android/$d"
+              fi
             fi
           done
 
@@ -215,10 +250,9 @@ jobs:
             --repo "$STORAGE_REPO" \
             --dir /tmp/ckpt \
             --pattern 'out_checkpoint.tar.zst.part_*'
-          cat /tmp/ckpt/out_checkpoint.tar.zst.part_* | zstd -d -T0 | tar -xPf - --overwrite
+          cat /tmp/ckpt/out_checkpoint.tar.zst.part_* | zstd -d -T0 | tar -xPf - --overwrite --exclude='*/symbols/*'
           rm -rf /tmp/ckpt
 
-          # Drop extracted unstripped symbols (~5 GB) so /mnt keeps ~4 GB free and / gains ~6 GB headroom
           sudo mkdir -p /mnt/out_ext/host
           sudo chown -R "$USER:$USER" /mnt/out_ext
           rm -rf /mnt/out_ext/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols" /home/runner/out/soong/.temp/*
@@ -236,7 +270,7 @@ jobs:
           (
             SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
             while true; do
-              sleep 30
+              sleep 15
               find "$SYM_DIR" -type f -delete 2>/dev/null || true
             done
           ) &
@@ -270,7 +304,7 @@ jobs:
               --notes "Auto-generated build checkpoint"
 
             set -o pipefail
-            tar -cPf - /home/runner/out /mnt/out_ext \
+            tar -cPf - --exclude='*/symbols/*' /home/runner/out /mnt/out_ext \
               | zstd -3 -T0 \
               | split -b 1900M --filter='cat > /tmp/ckpt/$FILE && gh release upload build-checkpoint /tmp/ckpt/$FILE --repo "$STORAGE_REPO" && rm -f /tmp/ckpt/$FILE' - out_checkpoint.tar.zst.part_
 

@@ -288,8 +288,8 @@ jobs:
                 fi
               done
 
-              # Truncate Soong's unstripped/* binaries once stripped output exists (skipping *.ndk modules needed by abidw)
-              find "$SOONG_INT" -path '*/unstripped/*' -type f -size +1M -mmin +3 2>/dev/null | while IFS= read -r f; do
+             # Truncate Soong's unstripped/* C/C++ binaries once stripped output exists (skipping Rust *_dylib and *.ndk)
+              find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -name '*.dylib.so' -type f -size +1M -mmin +3 2>/dev/null | while IFS= read -r f; do
                 BASE=$(basename "$f")
                 STEM="${BASE%.*}"
                 if [ -n "$(find "$SOONG_INT" -maxdepth 6 -type d -name "${STEM}.ndk" -print -quit 2>/dev/null)" ]; then

@@ -1,4 +1,4 @@
-name: Build LineageOS 20.0(alo)
+name: Build LineageOS 20.0
 
 on:
   workflow_dispatch:
@@ -268,14 +268,24 @@ jobs:
           set +e
           cd ~/android
 
-          # Safely prune write-only symbols, stripped non-NDK unstripped/* files, and Make LINKED/* copies (never touches .o/.a)
+          # Safely truncate symbols AFTER symbols_map writes .textproto, plus Make LINKED/* and host unstripped/*
           (
             SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
             OBJ_DIR="/home/runner/out/target/product/${{ inputs.device }}/obj"
             SOONG_INT="/home/runner/out/soong/.intermediates"
             while true; do
-              sleep 20
-              find "$SYM_DIR" -type f -delete 2>/dev/null || true
+              sleep 15
+
+              # Truncate symbols/* only once symbols_map has already generated the corresponding .textproto
+              find "$SYM_DIR" -type f -size +0c 2>/dev/null | while IFS= read -r f; do
+                REL="${f#$SYM_DIR/}"
+                TEXTPROTO="$OBJ_DIR/PACKAGING/elf_symbol_mapping_intermediates/${REL}.textproto"
+                if [ -s "$TEXTPROTO" ]; then
+                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+                  truncate -s 0 "$f" 2>/dev/null || continue
+                  touch -d "@$MTIME" "$f" 2>/dev/null || true
+                fi
+              done
 
               # Truncate Make's unstripped obj/*_intermediates/LINKED/* copies once parent stripped binary exists
               find "$OBJ_DIR" -path '*/LINKED/*' -type f -size +512k -mmin +3 2>/dev/null | while IFS= read -r f; do
@@ -288,13 +298,9 @@ jobs:
                 fi
               done
 
-             # Truncate Soong's unstripped/* C/C++ binaries once stripped output exists (skipping Rust *_dylib and *.ndk)
-              find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -name '*.dylib.so' -type f -size +1M -mmin +3 2>/dev/null | while IFS= read -r f; do
+              # Truncate host linux_glibc*/unstripped/* binaries only (never touches target android_* unstripped files)
+              find "$SOONG_INT" -path '*linux_glibc*/unstripped/*' -type f -size +1M -mmin +3 2>/dev/null | while IFS= read -r f; do
                 BASE=$(basename "$f")
-                STEM="${BASE%.*}"
-                if [ -n "$(find "$SOONG_INT" -maxdepth 6 -type d -name "${STEM}.ndk" -print -quit 2>/dev/null)" ]; then
-                  continue
-                fi
                 VARIANT_DIR=$(dirname "$(dirname "$f")")
                 if [ -s "$VARIANT_DIR/$BASE" ] || [ -s "$VARIANT_DIR/stripped/$BASE" ]; then
                   MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue

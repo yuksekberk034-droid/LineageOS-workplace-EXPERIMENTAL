@@ -30,6 +30,9 @@ on:
         options:
           - systemimage vendorimage bootimage
           - bacon
+          - vendorimage
+          - systemimage
+          - bootimage
       resume_from_checkpoint:
         description: "Resume from a previous timeout checkpoint GitHub Release"
         required: true

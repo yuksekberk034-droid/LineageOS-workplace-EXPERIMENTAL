@@ -1,4 +1,4 @@
-name: Build LineageOS 20.0o
+name: Build LineageOS 20.0c
 
 on:
   workflow_dispatch:
@@ -52,8 +52,8 @@ env:
   PRODUCT_MINIMIZE_JAVA_DEBUG_INFO: "true"
   ART_BUILD_TARGET_DEBUG: "false"
   ART_BUILD_HOST_DEBUG: "false"
-  GOGC: "60"
-  _JAVA_OPTIONS: "-Xmx5g"
+  GOGC: "80"
+  _JAVA_OPTIONS: "-Xmx6g"
 
 jobs:
   build:
@@ -66,35 +66,22 @@ jobs:
       GH_TOKEN: ${{ secrets.STORAGE_TOKEN || secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Purge Unused Ubuntu Packages & Configure Swap + Local Storage
+      - name: Purge Unused Ubuntu Packages & Configure ZRAM + Local Storage
         run: |
           set -e
           sudo systemctl stop systemd-oomd docker docker.socket containerd snapd || true
 
-          # Use ZRAM if supported by runner kernel; otherwise keep built-in /mnt/swapfile (never eat / or RAM with tmpfs)
-          sudo modprobe zram num_devices=2 2>/dev/null || sudo modprobe zram 2>/dev/null || true
+          sudo modprobe zram 2>/dev/null || true
           if [ ! -b /dev/zram0 ] && [ -e /sys/class/zram-control/hot_add ]; then
             sudo cat /sys/class/zram-control/hot_add >/dev/null 2>&1 || true
           fi
-
           if [ -b /dev/zram0 ]; then
             sudo swapoff -a || true
             sudo rm -f /mnt/swapfile
             sudo zramctl /dev/zram0 --reset 2>/dev/null || true
-            if sudo zramctl /dev/zram0 --algorithm zstd --size 8G 2>/dev/null; then
-              sudo mkswap /dev/zram0 >/dev/null
-              sudo swapon -p 100 /dev/zram0
-            fi
-          fi
-
-          if [ ! -b /dev/zram1 ] && [ -e /sys/class/zram-control/hot_add ]; then
-            sudo cat /sys/class/zram-control/hot_add >/dev/null 2>&1 || true
-          fi
-          if [ -b /dev/zram1 ]; then
-            sudo zramctl /dev/zram1 --reset 2>/dev/null || true
-            if sudo zramctl /dev/zram1 --algorithm zstd --size 7G 2>/dev/null; then
-              sudo mkfs.ext4 -F -m 0 -O ^has_journal /dev/zram1 >/dev/null
-            fi
+            sudo zramctl /dev/zram0 --algorithm zstd --size 12G
+            sudo mkswap /dev/zram0
+            sudo swapon -p 100 /dev/zram0
           fi
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
@@ -147,11 +134,6 @@ jobs:
           mkdir -p /home/runner/out/soong/.intermediates \
             /home/runner/out/target/common \
             "/home/runner/out/target/product/${{ inputs.device }}/symbols"
-          if [ -b /dev/zram1 ] && blkid /dev/zram1 >/dev/null 2>&1; then
-            sudo mount -o discard,noatime /dev/zram1 /home/runner/out/target/common
-            sudo chown -R "$USER:$USER" /home/runner/out/target/common
-          fi
-
           sudo mkdir -p /mnt/out_ext/host /mnt/prebuilts_ext
           sudo chown -R "$USER:$USER" /mnt/out_ext /mnt/prebuilts_ext
           ln -sfn /mnt/out_ext/host /home/runner/out/host
@@ -203,7 +185,7 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot manifest, then delete .repo, all .git dirs, and non-Linux/ARM prebuilts
+          # Snapshot manifest, then delete .repo, all .git dirs, and non-Linux/ARM prebuilts (keeps vndk & cts intact)
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo \
             prebuilts/*/darwin-x86 \
@@ -314,99 +296,84 @@ jobs:
           set +e
           cd ~/android
 
-          # Flush disk caches so full ~15 GB physical RAM is available for Soong bootstrap
-          sudo sync
-          echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null || true
+          # Safely truncate completed symbols (after .textproto exists), Make LINKED/*, and non-NDK/non-Rust unstripped/* (>1m old)
+          (
+            SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
+            OBJ_DIR="/home/runner/out/target/product/${{ inputs.device }}/obj"
+            SOONG_INT="/home/runner/out/soong/.intermediates"
+            NDK_LIST_FILE="/tmp/ndk_stems.txt"
+            find "$SOONG_INT" -type d -name '*.ndk' 2>/dev/null | sed 's|.*/||; s|\.ndk$||' | sort -u > "$NDK_LIST_FILE" || true
+
+            while true; do
+              sleep 12
+
+              # Truncate symbols/* only once symbols_map has already generated the corresponding .textproto
+              find "$SYM_DIR" -type f -size +0c 2>/dev/null | while IFS= read -r f; do
+                REL="${f#$SYM_DIR/}"
+                TEXTPROTO="$OBJ_DIR/PACKAGING/elf_symbol_mapping_intermediates/${REL}.textproto"
+                if [ -s "$TEXTPROTO" ]; then
+                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+                  truncate -s 0 "$f" 2>/dev/null || continue
+                  touch -d "@$MTIME" "$f" 2>/dev/null || true
+                fi
+              done
+
+              # Truncate Make's unstripped obj/*_intermediates/LINKED/* copies once parent stripped binary exists
+              find "$OBJ_DIR" -path '*/LINKED/*' -type f -size +256k -mmin +1 2>/dev/null | while IFS= read -r f; do
+                BASE=$(basename "$f")
+                INTER_DIR=$(dirname "$(dirname "$f")")
+                if [ -s "$INTER_DIR/$BASE" ]; then
+                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+                  truncate -s 0 "$f" 2>/dev/null || continue
+                  touch -d "@$MTIME" "$f" 2>/dev/null || true
+                fi
+              done
+
+              # Truncate Soong's C/C++ unstripped/* binaries >1m old once stripped output exists (never touches NDK or Rust)
+              find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +256k -mmin +1 2>/dev/null | while IFS= read -r f; do
+                BASE=$(basename "$f")
+                STEM="${BASE%.*}"
+                case "$STEM" in
+                  libc|libm|libdl|liblog|libz|libstdc++|libEGL|libGLESv1_CM|libGLESv2|libGLESv3|libvulkan|libOpenSLES|libOpenMAXAL|libandroid|libjnigraphics|libmediandk|libcamera2ndk|libaaudio|libamidi|libbinder_ndk|libnativehelper|libnativewindow|libneuralnetworks|libsync|libicu) continue ;;
+                esac
+                if [ -s "$NDK_LIST_FILE" ] && grep -qxF "$STEM" "$NDK_LIST_FILE"; then
+                  continue
+                fi
+                VARIANT_DIR=$(dirname "$(dirname "$f")")
+                if [ -s "$VARIANT_DIR/$BASE" ] || [ -s "$VARIANT_DIR/stripped/$BASE" ]; then
+                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+                  truncate -s 0 "$f" 2>/dev/null || continue
+                  touch -d "@$MTIME" "$f" 2>/dev/null || true
+                fi
+              done
+
+              FREE_KB=$(df -Pk / | awk 'NR==2 {print $4}')
+              if [ "${FREE_KB:-0}" -lt 6000000 ]; then
+                find /home/runner/out/soong/.temp -mindepth 1 -maxdepth 1 -mmin +10 -exec rm -rf {} + 2>/dev/null || true
+              fi
+            done
+          ) &
+          SYM_PRUNE_PID=$!
 
           timeout --signal=TERM 295m bash -c '
             set -e
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
 
-            free -h
-          # Add temporary 8 GB swap on / ONLY for Soong bootstrap (when / still has full free space)
-          if [ ! -b /dev/zram0 ]; then
-            sudo fallocate -l 8G /soong_bootstrap.swap || sudo dd if=/dev/zero of=/soong_bootstrap.swap bs=1M count=8192 status=none
-            sudo chmod 600 /soong_bootstrap.swap
-            sudo mkswap /soong_bootstrap.swap >/dev/null
-            sudo swapon -p 50 /soong_bootstrap.swap
-          fi
+            mka -j2 nothing
 
-          free -h
-          GOMAXPROCS=1 GOGC=25 mka -j2 nothing
-
-          # Delete temporary swap immediately after soong_build exits so Ninja gets the full 8 GB back
-          if [ -f /soong_bootstrap.swap ]; then
-            sudo swapoff /soong_bootstrap.swap
-            sudo rm -f /soong_bootstrap.swap
-          fi
-         
-
-            # Truncate ~9.5 GB of unbuilt CTS/dEQP/old-VNDK files in-place (preserves dir mtimes so soong_build never re-runs)
-            find cts external/deqp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
-              -type f -size +32k -exec truncate -s 0 {} + 2>/dev/null || true
-
-            # Start background cleaner AFTER soong_build exits so it never competes for RAM/I/O during bootstrap
-            (
-              SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
-              OBJ_DIR="/home/runner/out/target/product/${{ inputs.device }}/obj"
-              SOONG_INT="/home/runner/out/soong/.intermediates"
-              NDK_LIST_FILE="/tmp/ndk_stems.txt"
-              find "$SOONG_INT" -type d -name "*.ndk" 2>/dev/null | sed "s|.*/||; s|\.ndk$||" | sort -u > "$NDK_LIST_FILE" || true
-
-              while true; do
-                sleep 12
-
-                find "$SYM_DIR" -type f -size +0c 2>/dev/null | while IFS= read -r f; do
-                  REL="${f#$SYM_DIR/}"
-                  TEXTPROTO="$OBJ_DIR/PACKAGING/elf_symbol_mapping_intermediates/${REL}.textproto"
-                  if [ -s "$TEXTPROTO" ]; then
-                    MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
-                    truncate -s 0 "$f" 2>/dev/null || continue
-                    touch -d "@$MTIME" "$f" 2>/dev/null || true
-                  fi
-                done
-
-                find "$OBJ_DIR" -path "*/LINKED/*" -type f -size +256k -mmin +1 2>/dev/null | while IFS= read -r f; do
-                  BASE=$(basename "$f")
-                  INTER_DIR=$(dirname "$(dirname "$f")")
-                  if [ -s "$INTER_DIR/$BASE" ]; then
-                    MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
-                    truncate -s 0 "$f" 2>/dev/null || continue
-                    touch -d "@$MTIME" "$f" 2>/dev/null || true
-                  fi
-                done
-
-                find "$SOONG_INT" -path "*/unstripped/*" ! -path "*_dylib/*" ! -path "*_rlib/*" ! -name "*.dylib.so" ! -name "*.rlib" -type f -size +256k -mmin +1 2>/dev/null | while IFS= read -r f; do
-                  BASE=$(basename "$f")
-                  STEM="${BASE%.*}"
-                  case "$STEM" in
-                    libc|libm|libdl|liblog|libz|libstdc++|libEGL|libGLESv1_CM|libGLESv2|libGLESv3|libvulkan|libOpenSLES|libOpenMAXAL|libandroid|libjnigraphics|libmediandk|libcamera2ndk|libaaudio|libamidi|libbinder_ndk|libnativehelper|libnativewindow|libneuralnetworks|libsync|libicu) continue ;;
-                  esac
-                  if [ -s "$NDK_LIST_FILE" ] && grep -qxF "$STEM" "$NDK_LIST_FILE"; then
-                    continue
-                  fi
-                  VARIANT_DIR=$(dirname "$(dirname "$f")")
-                  if [ -s "$VARIANT_DIR/$BASE" ] || [ -s "$VARIANT_DIR/stripped/$BASE" ]; then
-                    MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
-                    truncate -s 0 "$f" 2>/dev/null || continue
-                    touch -d "@$MTIME" "$f" 2>/dev/null || true
-                  fi
-                done
-              done
-            ) &
-            CLEANER_PID=$!
-            trap "kill $CLEANER_PID 2>/dev/null || true" EXIT
+            # Truncate ~10 GB of unbuilt CTS/dEQP/old-VNDK binary & test files in-place (preserves metadata & dir mtimes)
+            find cts external/deqp external/ltp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
+              -type f -size +32k \
+              ! -name "*.bp" ! -name "*.mk" ! -name "*.txt" ! -name "*.xml" ! -name "*.json" ! -name "*.go" ! -name "*.py" ! -name "*.sh" \
+              -exec truncate -s 0 {} + 2>/dev/null || true
 
             df -h / /mnt
             free -h
-            JOBS=$(nproc)
-            if [ ! -b /dev/zram0 ] && [ "$JOBS" -gt 3 ]; then
-              JOBS=3
-            fi
-            mka ${{ inputs.target }} -j"$JOBS"
+            mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?
+          kill "$SYM_PRUNE_PID" 2>/dev/null || true
 
           set -e
           if [ "$BUILD_EXIT" -eq 0 ]; then
@@ -468,3 +435,4 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
+            

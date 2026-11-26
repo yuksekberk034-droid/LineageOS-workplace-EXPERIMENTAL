@@ -148,7 +148,13 @@ jobs:
           mkdir -p /home/runner/out/soong/.intermediates \
             /home/runner/out/target/common \
             "/home/runner/out/target/product/${{ inputs.device }}/symbols"
-          sudo mount -o discard,noatime /dev/zram1 /home/runner/out/target/common
+          if [ -b /dev/zram1 ] && blkid /dev/zram1 >/dev/null 2>&1; then
+            sudo mount -o discard,noatime /dev/zram1 /home/runner/out/target/common
+          else
+            sudo mount -t tmpfs -o size=7G,noatime tmpfs /home/runner/out/target/common
+          fi
+          sudo chown -R "$USER:$USER" /home/runner/out/target/common
+
           sudo chown -R "$USER:$USER" /home/runner/out/target/common
 
           sudo mkdir -p /mnt/out_ext/host /mnt/prebuilts_ext

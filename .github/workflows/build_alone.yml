@@ -325,7 +325,22 @@ jobs:
 
             free -h
             # Limit Go to 2 OS threads + aggressive GC so peak RAM stays ~7.5-8.5 GB instead of ~14 GB
+            # Add temporary 8 GB swap on / ONLY for Soong bootstrap (when / still has full free space)
+            if [ ! -b /dev/zram0 ]; then
+              sudo fallocate -l 8G /soong_bootstrap.swap || sudo dd if=/dev/zero of=/soong_bootstrap.swap bs=1M count=8192 status=none
+              sudo chmod 600 /soong_bootstrap.swap
+              sudo mkswap /soong_bootstrap.swap >/dev/null
+              sudo swapon -p 50 /soong_bootstrap.swap
+            fi
+
+            free -h
             GOMAXPROCS=2 GOGC=30 mka -j2 nothing
+
+            # Delete temporary swap immediately after soong_build exits so Ninja gets the full 8 GB back
+            if [ -f /soong_bootstrap.swap ]; then
+              sudo swapoff /soong_bootstrap.swap
+              sudo rm -f /soong_bootstrap.swap
+            fi
 
             # Truncate ~9.5 GB of unbuilt CTS/dEQP/old-VNDK files in-place (preserves dir mtimes so soong_build never re-runs)
             find cts external/deqp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \

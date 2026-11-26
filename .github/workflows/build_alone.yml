@@ -1,4 +1,4 @@
-name: Build LineageOS 20.0(a)
+name: Build LineageOS 20.0b
 
 on:
   workflow_dispatch:
@@ -66,25 +66,33 @@ jobs:
       GH_TOKEN: ${{ secrets.STORAGE_TOKEN || secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Purge Unused Ubuntu Packages & Configure ZRAM + Local Storage
+      - name: Purge Unused Ubuntu Packages & Configure Swap + Local Storage
         run: |
           set -e
           sudo systemctl stop systemd-oomd docker docker.socket containerd snapd || true
 
-          # Configure ZRAM if supported by runner kernel; fall back cleanly to tmpfs (never fail the build)
-          sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile
+          # Use ZRAM if supported by runner kernel; otherwise keep /mnt/swapfile + add /swapfile (never use tmpfs)
           sudo modprobe zram num_devices=2 2>/dev/null || sudo modprobe zram 2>/dev/null || true
-
           if [ ! -b /dev/zram0 ] && [ -e /sys/class/zram-control/hot_add ]; then
             sudo cat /sys/class/zram-control/hot_add >/dev/null 2>&1 || true
           fi
+
           if [ -b /dev/zram0 ]; then
+            sudo swapoff -a || true
+            sudo rm -f /mnt/swapfile
             sudo zramctl /dev/zram0 --reset 2>/dev/null || true
             if sudo zramctl /dev/zram0 --algorithm zstd --size 8G 2>/dev/null; then
               sudo mkswap /dev/zram0 >/dev/null
               sudo swapon -p 100 /dev/zram0
             fi
+          fi
+
+          SWAP_TOTAL_KB=$(awk '/SwapTotal/ {print $2}' /proc/meminfo)
+          if [ "${SWAP_TOTAL_KB:-0}" -lt 7000000 ]; then
+            sudo fallocate -l 6G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=6144 status=none
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile >/dev/null
+            sudo swapon /swapfile
           fi
 
           if [ ! -b /dev/zram1 ] && [ -e /sys/class/zram-control/hot_add ]; then
@@ -96,7 +104,6 @@ jobs:
               sudo mkfs.ext4 -F -m 0 -O ^has_journal /dev/zram1 >/dev/null
             fi
           fi
-
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
             'temurin-*' 'openjdk-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \
@@ -150,12 +157,8 @@ jobs:
             "/home/runner/out/target/product/${{ inputs.device }}/symbols"
           if [ -b /dev/zram1 ] && blkid /dev/zram1 >/dev/null 2>&1; then
             sudo mount -o discard,noatime /dev/zram1 /home/runner/out/target/common
-          else
-            sudo mount -t tmpfs -o size=7G,noatime tmpfs /home/runner/out/target/common
+            sudo chown -R "$USER:$USER" /home/runner/out/target/common
           fi
-          sudo chown -R "$USER:$USER" /home/runner/out/target/common
-
-          sudo chown -R "$USER:$USER" /home/runner/out/target/common
 
           sudo mkdir -p /mnt/out_ext/host /mnt/prebuilts_ext
           sudo chown -R "$USER:$USER" /mnt/out_ext /mnt/prebuilts_ext
@@ -375,7 +378,8 @@ jobs:
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
 
-            mka -j2 nothing
+            # Tighter Go GC during Soong bootstrap keeps peak RAM ~6.5-7.5 GB instead of ~12 GB
+            GOGC=40 mka -j2 nothing
 
             # Truncate ~9.5 GB of unbuilt CTS/dEQP/old-VNDK files in-place (preserves dir mtimes so soong_build never re-runs)
             find cts external/deqp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
@@ -448,3 +452,4 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
+            

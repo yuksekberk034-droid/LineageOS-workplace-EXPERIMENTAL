@@ -76,13 +76,16 @@ jobs:
             sudo cat /sys/class/zram-control/hot_add >/dev/null 2>&1 || true
           fi
           if [ -b /dev/zram0 ]; then
-            sudo swapoff -a || true
-            sudo rm -f /mnt/swapfile
+            sudo swapoff /dev/zram0 2>/dev/null || true
             sudo zramctl /dev/zram0 --reset 2>/dev/null || true
-            sudo zramctl /dev/zram0 --algorithm zstd --size 12G
-            sudo mkswap /dev/zram0
-            sudo swapon -p 100 /dev/zram0
+            if sudo zramctl /dev/zram0 --algorithm zstd --size 12G 2>/dev/null; then
+              sudo swapoff -a || true
+              sudo rm -f /mnt/swapfile
+              sudo mkswap /dev/zram0
+              sudo swapon -p 100 /dev/zram0
+            fi
           fi
+          
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
             'temurin-*' 'openjdk-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \

@@ -352,8 +352,8 @@ jobs:
 
             df -h / /mnt
             free -h
-            mka -j2 nothing
-            mka ${{ inputs.target }} -j"$(nproc)"
+            mka -j1 nothing
+            mka ${{ inputs.target }} -j4
           '
           BUILD_EXIT=$?
           kill "$SYM_PRUNE_PID" 2>/dev/null || true

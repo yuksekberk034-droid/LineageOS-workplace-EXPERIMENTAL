@@ -70,12 +70,22 @@ jobs:
         run: |
           set -e
           sudo systemctl stop systemd-oomd docker docker.socket containerd snapd || true
-          sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile
-          sudo modprobe zram
-          sudo zramctl /dev/zram0 --algorithm zstd --size 12G
-          sudo mkswap /dev/zram0
-          sudo swapon -p 100 /dev/zram0
+
+          sudo modprobe zram 2>/dev/null || true
+          if [ ! -b /dev/zram0 ] && [ -e /sys/class/zram-control/hot_add ]; then
+            sudo cat /sys/class/zram-control/hot_add >/dev/null 2>&1 || true
+          fi
+          if [ -b /dev/zram0 ]; then
+            sudo swapoff /dev/zram0 2>/dev/null || true
+            sudo zramctl /dev/zram0 --reset 2>/dev/null || true
+            if sudo zramctl /dev/zram0 --algorithm zstd --size 12G 2>/dev/null; then
+              sudo swapoff -a || true
+              sudo rm -f /mnt/swapfile
+              sudo mkswap /dev/zram0
+              sudo swapon -p 100 /dev/zram0
+            fi
+          fi
+
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
             'temurin-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \
             'azure-cli' 'google-cloud-cli' 'powershell' 'dotnet*' 'mono-*' \
@@ -83,6 +93,7 @@ jobs:
             'snapd' 'apport*' 'man-db' 'fonts-noto*' || true
           sudo apt-get autoremove -y --purge || true
           sudo apt-get clean
+
           sudo rm -rf \
             /var/lib/docker \
             /var/lib/snapd \
@@ -110,15 +121,18 @@ jobs:
             /usr/share/doc/* \
             /usr/share/man/* \
             /usr/share/locale/*
-          # Place fixed-size out/host (~4.3 GB) on /mnt (14 GB total), keep symbols on / where they get pruned
+
+          # Place fixed-size out/host (~4.3 GB) on /mnt, keep symbols on / where they get pruned safely
           mkdir -p /home/runner/out/soong/.intermediates \
             /home/runner/out/target/common \
             "/home/runner/out/target/product/${{ inputs.device }}/symbols"
           sudo mkdir -p /mnt/out_ext/host /mnt/prebuilts_ext
           sudo chown -R "$USER:$USER" /mnt/out_ext /mnt/prebuilts_ext
           ln -sfn /mnt/out_ext/host /home/runner/out/host
+
           df -h / /mnt
           free -h
+
       - name: Install Minimal Build Dependencies
         run: |
           set -e
@@ -129,32 +143,40 @@ jobs:
             liblz4-tool libncurses6 libncurses-dev libsdl1.2-dev libssl-dev \
             libxml2 libxml2-utils lzop openssh-client pngcrush rsync schedtool \
             squashfs-tools unzip xsltproc zip zlib1g-dev python-is-python3 zstd
+
           if ! command -v gh >/dev/null 2>&1; then
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh
           fi
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/* /var/log/* /home/runner/.cache/*
+
           if [ ! -e /usr/lib/x86_64-linux-gnu/libncurses.so.5 ] && [ -e /usr/lib/x86_64-linux-gnu/libncurses.so.6 ]; then
             sudo ln -s /usr/lib/x86_64-linux-gnu/libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
             sudo ln -s /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5
           fi
+
           mkdir -p ~/.bin
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/.bin/repo
           chmod a+x ~/.bin/repo
           echo "$HOME/.bin" >> "$GITHUB_PATH"
+
       - name: Sync LineageOS Source & Balance Storage Across / and /mnt
         run: |
           set -e
           mkdir -p ~/android
           cd ~/android
+
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git config --global color.ui false
+
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1 --git-lfs
           repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j"$(nproc)"
+
           mkdir -p device/tcl vendor/tcl
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
+
           # Snapshot manifest, then delete .repo, non-kernel .git, and non-Linux/x86 prebuilts (keeps cts & jdk8 intact)
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo \
@@ -165,69 +187,162 @@ jobs:
             external/chromium-webview/prebuilt/x86 \
             external/chromium-webview/prebuilt/x86_64
           find . -not -path "./kernel/*" -name ".git" -prune -exec rm -rf {} +
+
           mkdir -p .repo/manifests .repo/repo
           cp /tmp/build-manifest-snapshot.xml .repo/manifest.xml
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
-          # Offload ~5.6 GB of static prebuilts to local /mnt NVMe via bind mounts so Soong scans their Android.bp files
+
+          # Offload static prebuilts to local /mnt NVMe via bind mounts while keeping 4.8 GB reserved on /mnt for out/host
           for d in \
             prebuilts/build-tools \
             prebuilts/misc \
             prebuilts/rust/linux-x86 \
             prebuilts/go/linux-x86 \
             prebuilts/jdk/jdk11 \
-            prebuilts/jdk/jdk17; do
+            prebuilts/jdk/jdk17 \
+            prebuilts/clang-tools \
+            prebuilts/r8 \
+            prebuilts/tools \
+            external/chromium-webview/prebuilt/arm \
+            external/chromium-webview/prebuilt/arm64; do
             if [ -d "$HOME/android/$d" ]; then
-              mkdir -p "/mnt/prebuilts_ext/$(dirname "$d")"
-              mv "$HOME/android/$d" "/mnt/prebuilts_ext/$d"
-              mkdir -p "$HOME/android/$d"
-              sudo mount --bind "/mnt/prebuilts_ext/$d" "$HOME/android/$d"
+              DIR_KB=$(du -sk "$HOME/android/$d" | awk '{print $1}')
+              MNT_FREE_KB=$(df -Pk /mnt | awk 'NR==2 {print $4}')
+              if [ $((MNT_FREE_KB - DIR_KB)) -gt 4800000 ]; then
+                mkdir -p "/mnt/prebuilts_ext/$(dirname "$d")"
+                mv "$HOME/android/$d" "/mnt/prebuilts_ext/$d"
+                mkdir -p "$HOME/android/$d"
+                sudo mount --bind "/mnt/prebuilts_ext/$d" "$HOME/android/$d"
+              fi
             fi
           done
+
           df -h / /mnt
+
       - name: Restore Build Checkpoint from GitHub Release
         if: inputs.resume_from_checkpoint
         run: |
           set -e
           mkdir -p /tmp/ckpt
+
           find ~/android -exec touch -h -t 202001010000 {} +
+
           gh release download build-checkpoint \
             --repo "$STORAGE_REPO" \
             --dir /tmp/ckpt \
             --pattern 'out_checkpoint.tar.zst.part_*'
-          cat /tmp/ckpt/out_checkpoint.tar.zst.part_* | zstd -d -T0 | tar -xPf - --overwrite
+          cat /tmp/ckpt/out_checkpoint.tar.zst.part_* | zstd -d -T0 | tar -xPf - --overwrite --exclude='*/symbols/*'
           rm -rf /tmp/ckpt
-          # Drop extracted unstripped symbols (~5 GB) so /mnt keeps ~4 GB free and / gains ~6 GB headroom
+
+          # Drop any residual unstripped symbols and reconnect /mnt/out_ext/host
           sudo mkdir -p /mnt/out_ext/host
           sudo chown -R "$USER:$USER" /mnt/out_ext
           rm -rf /mnt/out_ext/symbols "/home/runner/out/target/product/${{ inputs.device }}/symbols" /home/runner/out/soong/.temp/*
           mkdir -p "/home/runner/out/target/product/${{ inputs.device }}/symbols"
           ln -sfn /mnt/out_ext/host /home/runner/out/host
+
+          # Immediately reclaim space from already-stripped C/C++ unstripped/* files restored from the checkpoint
+          SOONG_INT="/home/runner/out/soong/.intermediates"
+          NDK_STEMS=$(find "$SOONG_INT" -type d -name '*.ndk' 2>/dev/null | sed 's|.*/||; s|\.ndk$||' | sort -u)
+          find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +256k 2>/dev/null | while IFS= read -r f; do
+            BASE=$(basename "$f")
+            STEM="${BASE%.*}"
+            case "$STEM" in
+              libc|libm|libdl|liblog|libz|libstdc++|libEGL|libGLESv1_CM|libGLESv2|libGLESv3|libvulkan|libOpenSLES|libOpenMAXAL|libandroid|libjnigraphics|libmediandk|libcamera2ndk|libaaudio|libamidi|libbinder_ndk|libnativehelper|libnativewindow|libneuralnetworks|libsync|libicu) continue ;;
+            esac
+            if printf '%s\n' "$NDK_STEMS" | grep -qxF "$STEM"; then
+              continue
+            fi
+            VARIANT_DIR=$(dirname "$(dirname "$f")")
+            if [ -s "$VARIANT_DIR/$BASE" ] || [ -s "$VARIANT_DIR/stripped/$BASE" ]; then
+              MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+              truncate -s 0 "$f" 2>/dev/null || continue
+              touch -d "@$MTIME" "$f" 2>/dev/null || true
+            fi
+          done
+
           df -h / /mnt
+
       - name: Build LineageOS
         run: |
           set +e
           cd ~/android
-          # Continuously prune write-only unstripped symbols so neither / nor /mnt fills up
+
+          # Safely truncate completed symbols (after .textproto exists), Make LINKED/*, and non-NDK/non-Rust unstripped/* (>2m old)
           (
             SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
+            OBJ_DIR="/home/runner/out/target/product/${{ inputs.device }}/obj"
+            SOONG_INT="/home/runner/out/soong/.intermediates"
+            NDK_LIST_FILE="/tmp/ndk_stems.txt"
+            find "$SOONG_INT" -type d -name '*.ndk' 2>/dev/null | sed 's|.*/||; s|\.ndk$||' | sort -u > "$NDK_LIST_FILE" || true
+
             while true; do
-              sleep 30
-              find "$SYM_DIR" -type f -delete 2>/dev/null || true
+              sleep 15
+
+              # Truncate symbols/* only once symbols_map has generated the matching .textproto
+              find "$SYM_DIR" -type f -size +0c 2>/dev/null | while IFS= read -r f; do
+                REL="${f#$SYM_DIR/}"
+                TEXTPROTO="$OBJ_DIR/PACKAGING/elf_symbol_mapping_intermediates/${REL}.textproto"
+                if [ -s "$TEXTPROTO" ]; then
+                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+                  truncate -s 0 "$f" 2>/dev/null || continue
+                  touch -d "@$MTIME" "$f" 2>/dev/null || true
+                fi
+              done
+
+              # Truncate Make's unstripped obj/*_intermediates/LINKED/* copies once stripped binary exists
+              find "$OBJ_DIR" -path '*/LINKED/*' -type f -size +256k -mmin +2 2>/dev/null | while IFS= read -r f; do
+                BASE=$(basename "$f")
+                INTER_DIR=$(dirname "$(dirname "$f")")
+                if [ -s "$INTER_DIR/$BASE" ]; then
+                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+                  truncate -s 0 "$f" 2>/dev/null || continue
+                  touch -d "@$MTIME" "$f" 2>/dev/null || true
+                fi
+              done
+
+              # Truncate Soong's C/C++ unstripped/* binaries >2m old once stripped output exists (never touches NDK or Rust)
+              find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +256k -mmin +2 2>/dev/null | while IFS= read -r f; do
+                BASE=$(basename "$f")
+                STEM="${BASE%.*}"
+                case "$STEM" in
+                  libc|libm|libdl|liblog|libz|libstdc++|libEGL|libGLESv1_CM|libGLESv2|libGLESv3|libvulkan|libOpenSLES|libOpenMAXAL|libandroid|libjnigraphics|libmediandk|libcamera2ndk|libaaudio|libamidi|libbinder_ndk|libnativehelper|libnativewindow|libneuralnetworks|libsync|libicu) continue ;;
+                esac
+                if [ -s "$NDK_LIST_FILE" ] && grep -qxF "$STEM" "$NDK_LIST_FILE"; then
+                  continue
+                fi
+                VARIANT_DIR=$(dirname "$(dirname "$f")")
+                if [ -s "$VARIANT_DIR/$BASE" ] || [ -s "$VARIANT_DIR/stripped/$BASE" ]; then
+                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+                  truncate -s 0 "$f" 2>/dev/null || continue
+                  touch -d "@$MTIME" "$f" 2>/dev/null || true
+                fi
+              done
             done
           ) &
           SYM_PRUNE_PID=$!
+
           timeout --signal=TERM 295m bash -c '
             set -e
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
+
+            mka -j2 nothing
+
+            # Truncate ~9.5 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves dir mtimes so soong_build never re-runs)
+            find cts external/deqp external/ltp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
+              -type f -size +32k \
+              ! -name "*.bp" ! -name "*.mk" ! -name "*.txt" ! -name "*.xml" ! -name "*.json" ! -name "*.go" ! -name "*.py" ! -name "*.sh" \
+              -exec truncate -s 0 {} + 2>/dev/null || true
+
             df -h / /mnt
             free -h
-            mka -j2 nothing
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?
           kill "$SYM_PRUNE_PID" 2>/dev/null || true
+
           set -e
           if [ "$BUILD_EXIT" -eq 0 ]; then
             echo "Build completed successfully!"
@@ -241,16 +356,19 @@ jobs:
               --prerelease \
               --title "LineageOS 20.0 Build Checkpoint" \
               --notes "Auto-generated build checkpoint"
+
             set -o pipefail
-            tar -cPf - /home/runner/out /mnt/out_ext \
+            tar -cPf - --exclude='*/symbols/*' /home/runner/out /mnt/out_ext \
               | zstd -3 -T0 \
               | split -b 1900M --filter='cat > /tmp/ckpt/$FILE && gh release upload build-checkpoint /tmp/ckpt/$FILE --repo "$STORAGE_REPO" && rm -f /tmp/ckpt/$FILE' - out_checkpoint.tar.zst.part_
+
             echo "Checkpoint saved. Re-run with resume_from_checkpoint=true."
             exit 1
           else
             echo "Build failed with exit code $BUILD_EXIT"
             exit "$BUILD_EXIT"
           fi
+
       - name: Upload Finished Images to GitHub Release
         if: success()
         run: |
@@ -258,6 +376,7 @@ jobs:
           PRODUCT_OUT="/home/runner/out/target/product/${{ inputs.device }}"
           RELEASE_TAG="lineage-20-${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
           ASSETS=()
+
           shopt -s nullglob
           ASSETS+=( "$PRODUCT_OUT"/lineage-*.zip )
           ASSETS+=( "$PRODUCT_OUT"/boot.img )
@@ -265,11 +384,13 @@ jobs:
           ASSETS+=( "$PRODUCT_OUT"/vendor.img )
           ASSETS+=( "$PRODUCT_OUT"/recovery.img )
           shopt -u nullglob
+
           if [ "${#ASSETS[@]}" -gt 0 ]; then
             gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
               --repo "$STORAGE_REPO" \
               --title "$RELEASE_TAG"
           fi
+
       - name: Upload GitHub Actions Artifacts
         if: success()
         uses: actions/upload-artifact@v4
@@ -282,3 +403,4 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
+            

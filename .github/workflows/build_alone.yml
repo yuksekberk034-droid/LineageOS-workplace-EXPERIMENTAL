@@ -39,6 +39,12 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: build-lineage-${{ inputs.device }}
+  queue: max
+  cancel-in-progress: false
+  
+
 permissions:
   contents: write
 

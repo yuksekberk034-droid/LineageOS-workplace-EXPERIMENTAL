@@ -74,11 +74,16 @@ jobs:
           # zram0 = 8G compressed swap; zram1 = 6G compressed ext4 filesystem for out/target/common (~4 GB off /)
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
-          sudo modprobe zram num_devices=2
+          sudo modprobe zram num_devices=2 || sudo modprobe zram
+          if [ ! -b /dev/zram1 ] && [ -e /sys/class/zram-control/hot_add ]; then
+            sudo cat /sys/class/zram-control/hot_add >/dev/null
+          fi
+          sudo zramctl /dev/zram0 --reset || true
           sudo zramctl /dev/zram0 --algorithm zstd --size 8G
           sudo mkswap /dev/zram0
           sudo swapon -p 100 /dev/zram0
 
+          sudo zramctl /dev/zram1 --reset || true
           sudo zramctl /dev/zram1 --algorithm zstd --size 6G
           sudo mkfs.ext4 -F -m 0 -O ^has_journal /dev/zram1
 

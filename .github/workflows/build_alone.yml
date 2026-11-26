@@ -71,21 +71,32 @@ jobs:
           set -e
           sudo systemctl stop systemd-oomd docker docker.socket containerd snapd || true
 
-          # zram0 = 8G compressed swap; zram1 = 6G compressed ext4 filesystem for out/target/common (~4 GB off /)
+          # Configure ZRAM if supported by runner kernel; fall back cleanly to tmpfs (never fail the build)
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
-          sudo modprobe zram num_devices=2 || sudo modprobe zram
-          if [ ! -b /dev/zram1 ] && [ -e /sys/class/zram-control/hot_add ]; then
-            sudo cat /sys/class/zram-control/hot_add >/dev/null
-          fi
-          sudo zramctl /dev/zram0 --reset || true
-          sudo zramctl /dev/zram0 --algorithm zstd --size 8G
-          sudo mkswap /dev/zram0
-          sudo swapon -p 100 /dev/zram0
+          sudo modprobe zram num_devices=2 2>/dev/null || sudo modprobe zram 2>/dev/null || true
 
-          sudo zramctl /dev/zram1 --reset || true
-          sudo zramctl /dev/zram1 --algorithm zstd --size 6G
-          sudo mkfs.ext4 -F -m 0 -O ^has_journal /dev/zram1
+          if [ ! -b /dev/zram0 ] && [ -e /sys/class/zram-control/hot_add ]; then
+            sudo cat /sys/class/zram-control/hot_add >/dev/null 2>&1 || true
+          fi
+          if [ -b /dev/zram0 ]; then
+            sudo zramctl /dev/zram0 --reset 2>/dev/null || true
+            if sudo zramctl /dev/zram0 --algorithm zstd --size 8G 2>/dev/null; then
+              sudo mkswap /dev/zram0 >/dev/null
+              sudo swapon -p 100 /dev/zram0
+            fi
+          fi
+
+          if [ ! -b /dev/zram1 ] && [ -e /sys/class/zram-control/hot_add ]; then
+            sudo cat /sys/class/zram-control/hot_add >/dev/null 2>&1 || true
+          fi
+          if [ -b /dev/zram1 ]; then
+            sudo zramctl /dev/zram1 --reset 2>/dev/null || true
+            if sudo zramctl /dev/zram1 --algorithm zstd --size 7G 2>/dev/null; then
+              sudo mkfs.ext4 -F -m 0 -O ^has_journal /dev/zram1 >/dev/null
+            fi
+          fi
+
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
             'temurin-*' 'openjdk-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \

@@ -25,14 +25,14 @@ on:
       target:
         description: "Make target"
         required: true
-        default: "systemimage vendorimage bootimage"
+        default: "bootimage"
         type: choice
         options:
-          - systemimage vendorimage bootimage
-          - bacon
+          - bootimage
           - vendorimage
           - systemimage
-          - bootimage
+          - systemimage vendorimage bootimage
+          - bacon
       resume_from_checkpoint:
         description: "Resume from a previous timeout checkpoint GitHub Release"
         required: true
@@ -85,19 +85,33 @@ jobs:
             echo -1000 | sudo tee "/proc/$pid/oom_score_adj" >/dev/null || true
           done
 
-          # Configure 4GB ZRAM (high priority) + 16GB Disk Swapfile (backup)
+          # Configure ZRAM (high priority) + dynamic /mnt/swapfile sized to leave room for out/host
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
 
-          sudo modprobe zram
-          sudo zramctl /dev/zram0 --algorithm zstd --size 4G
-          sudo mkswap /dev/zram0
-          sudo swapon -p 100 /dev/zram0
+          sudo modprobe zram 2>/dev/null || true
+          if [ ! -b /dev/zram0 ] && [ -e /sys/class/zram-control/hot_add ]; then
+            sudo cat /sys/class/zram-control/hot_add >/dev/null 2>&1 || true
+          fi
+          if [ -b /dev/zram0 ]; then
+            sudo zramctl /dev/zram0 --reset 2>/dev/null || true
+            if sudo zramctl /dev/zram0 --algorithm zstd --size 6G 2>/dev/null; then
+              sudo mkswap /dev/zram0 >/dev/null
+              sudo swapon -p 100 /dev/zram0
+            fi
+          fi
 
-          sudo fallocate -l 16G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon -p 10 /mnt/swapfile
+          MNT_AVAIL_GB=$(df -BG /mnt | awk 'NR==2 {gsub(/G/,"",$4); print $4}')
+          SWAP_GB=16
+          if [ "${MNT_AVAIL_GB:-0}" -lt 24 ]; then
+            SWAP_GB=8
+          fi
+          if [ "${MNT_AVAIL_GB:-0}" -gt 12 ]; then
+            sudo fallocate -l "${SWAP_GB}G" /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=$((SWAP_GB * 1024)) status=none
+            sudo chmod 600 /mnt/swapfile
+            sudo mkswap /mnt/swapfile >/dev/null
+            sudo swapon -p 10 /mnt/swapfile
+          fi
           sudo sysctl -w vm.swappiness=20
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
@@ -235,7 +249,32 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
-          df -h /
+          # Offload static prebuilts to /mnt via bind mounts while reserving 4.8 GB on /mnt for out/host
+          for d in \
+            prebuilts/build-tools \
+            prebuilts/misc \
+            prebuilts/rust/linux-x86 \
+            prebuilts/go/linux-x86 \
+            prebuilts/jdk/jdk11 \
+            prebuilts/jdk/jdk17 \
+            prebuilts/clang-tools \
+            prebuilts/r8 \
+            prebuilts/tools \
+            external/chromium-webview/prebuilt/arm \
+            external/chromium-webview/prebuilt/arm64; do
+            if [ -d "$HOME/android/$d" ]; then
+              DIR_KB=$(du -sk "$HOME/android/$d" | awk '{print $1}')
+              MNT_FREE_KB=$(df -Pk /mnt | awk 'NR==2 {print $4}')
+              if [ $((MNT_FREE_KB - DIR_KB)) -gt 4800000 ]; then
+                mkdir -p "/mnt/prebuilts_ext/$(dirname "$d")"
+                mv "$HOME/android/$d" "/mnt/prebuilts_ext/$d"
+                mkdir -p "$HOME/android/$d"
+                sudo mount --bind "/mnt/prebuilts_ext/$d" "$HOME/android/$d"
+              fi
+            fi
+          done
+
+          df -h / /mnt
           free -h
 
       - name: Restore Build Checkpoint from GitHub Release
@@ -279,7 +318,7 @@ jobs:
             fi
           done
 
-          df -h /
+          df -h / /mnt
           free -h
 
       - name: Build LineageOS
@@ -350,9 +389,16 @@ jobs:
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
 
-            df -h /
-            free -h
             mka -j2 nothing
+
+            # Truncate ~9.5 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves dir timestamps so soong_build never re-runs)
+            find cts external/deqp external/ltp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
+              -type f -size +32k \
+              ! -name "*.bp" ! -name "*.mk" ! -name "*.txt" ! -name "*.xml" ! -name "*.json" ! -name "*.go" ! -name "*.py" ! -name "*.sh" ! -name "*.rc" ! -name "*.te" ! -name "*.cil" ! -name "*.proto" \
+              -exec truncate -s 0 {} + 2>/dev/null || true
+
+            df -h / /mnt
+            free -h
             mka ${{ inputs.target }} -j4
           '
           BUILD_EXIT=$?
@@ -389,16 +435,19 @@ jobs:
         run: |
           set -e
           PRODUCT_OUT="/home/runner/out/target/product/${{ inputs.device }}"
-          RELEASE_TAG="lineage-20-${{ inputs.device }}-$(date +%Y%m%d-%H%M)"
+          TARGET_SLUG=$(echo "${{ inputs.target }}" | tr ' ' '-')
+          RELEASE_TAG="lineage-20-${{ inputs.device }}-${TARGET_SLUG}-$(date +%Y%m%d-%H%M)"
           ASSETS=()
 
           shopt -s nullglob
           ASSETS+=( "$PRODUCT_OUT"/lineage-*.zip )
-          ASSETS+=( "$PRODUCT_OUT"/boot.img )
-          ASSETS+=( "$PRODUCT_OUT"/system.img )
-          ASSETS+=( "$PRODUCT_OUT"/vendor.img )
-          ASSETS+=( "$PRODUCT_OUT"/recovery.img )
           shopt -u nullglob
+
+          for img in boot.img system.img vendor.img recovery.img vbmeta.img dtbo.img; do
+            if [ -f "$PRODUCT_OUT/$img" ]; then
+              ASSETS+=( "$PRODUCT_OUT/$img" )
+            fi
+          done
 
           if [ "${#ASSETS[@]}" -gt 0 ]; then
             gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
@@ -410,7 +459,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: lineage-20-${{ inputs.device }}
+          name: lineage-20-${{ inputs.device }}-${{ inputs.target }}
           if-no-files-found: warn
           path: |
             /home/runner/out/target/product/${{ inputs.device }}/lineage-*.zip
@@ -418,3 +467,4 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/system.img
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/recovery.img
+            

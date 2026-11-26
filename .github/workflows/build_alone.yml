@@ -1,4 +1,4 @@
-name: Build LineageOS 20.0a
+name: Build LineageOS 20.0(a)
 
 on:
   workflow_dispatch:
@@ -71,12 +71,16 @@ jobs:
           set -e
           sudo systemctl stop systemd-oomd docker docker.socket containerd snapd || true
 
+          # zram0 = 8G compressed swap; zram1 = 6G compressed ext4 filesystem for out/target/common (~4 GB off /)
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
-          sudo modprobe zram
-          sudo zramctl /dev/zram0 --algorithm zstd --size 12G
+          sudo modprobe zram num_devices=2
+          sudo zramctl /dev/zram0 --algorithm zstd --size 8G
           sudo mkswap /dev/zram0
           sudo swapon -p 100 /dev/zram0
+
+          sudo zramctl /dev/zram1 --algorithm zstd --size 6G
+          sudo mkfs.ext4 -F -m 0 -O ^has_journal /dev/zram1
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
             'temurin-*' 'openjdk-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \
@@ -128,11 +132,14 @@ jobs:
           mkdir -p /home/runner/out/soong/.intermediates \
             /home/runner/out/target/common \
             "/home/runner/out/target/product/${{ inputs.device }}/symbols"
+          sudo mount -o discard,noatime /dev/zram1 /home/runner/out/target/common
+          sudo chown -R "$USER:$USER" /home/runner/out/target/common
+
           sudo mkdir -p /mnt/out_ext/host /mnt/prebuilts_ext
           sudo chown -R "$USER:$USER" /mnt/out_ext /mnt/prebuilts_ext
           ln -sfn /mnt/out_ext/host /home/runner/out/host
 
-          df -h / /mnt
+          df -h / /mnt /home/runner/out/target/common
           free -h
 
       - name: Install Minimal Build Dependencies
@@ -179,7 +186,7 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot manifest, then delete .repo, all .git dirs, and non-Linux/ARM prebuilts (keeps vndk & cts intact)
+          # Snapshot manifest, then delete .repo, all .git dirs, and non-Linux/ARM prebuilts
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo \
             prebuilts/*/darwin-x86 \
@@ -240,7 +247,7 @@ jobs:
             fi
           done
 
-          df -h / /mnt
+          df -h / /mnt /home/runner/out/target/common
 
       - name: Restore Build Checkpoint from GitHub Release
         if: inputs.resume_from_checkpoint
@@ -263,10 +270,10 @@ jobs:
           mkdir -p "/home/runner/out/target/product/${{ inputs.device }}/symbols"
           ln -sfn /mnt/out_ext/host /home/runner/out/host
 
-          # Immediately reclaim ~6-8 GB from already-stripped C/C++ unstripped/* files restored from the checkpoint
+          # Immediately reclaim space from already-stripped C/C++ unstripped/* files restored from the checkpoint
           SOONG_INT="/home/runner/out/soong/.intermediates"
           NDK_STEMS=$(find "$SOONG_INT" -type d -name '*.ndk' 2>/dev/null | sed 's|.*/||; s|\.ndk$||' | sort -u)
-          find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +512k 2>/dev/null | while IFS= read -r f; do
+          find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +256k 2>/dev/null | while IFS= read -r f; do
             BASE=$(basename "$f")
             STEM="${BASE%.*}"
             case "$STEM" in
@@ -283,22 +290,24 @@ jobs:
             fi
           done
 
-          df -h / /mnt
+          df -h / /mnt /home/runner/out/target/common
 
       - name: Build LineageOS
         run: |
           set +e
           cd ~/android
 
-          # Safely truncate completed symbols (after .textproto exists), Make LINKED/*, and non-NDK/non-Rust unstripped/*
+          # Fast background cleaner: truncates symbols (after .textproto exists), Make LINKED/*, and non-NDK/non-Rust unstripped/* (>1m old)
           (
             SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
             OBJ_DIR="/home/runner/out/target/product/${{ inputs.device }}/obj"
             SOONG_INT="/home/runner/out/soong/.intermediates"
-            while true; do
-              sleep 15
+            NDK_LIST_FILE="/tmp/ndk_stems.txt"
+            find "$SOONG_INT" -type d -name '*.ndk' 2>/dev/null | sed 's|.*/||; s|\.ndk$||' | sort -u > "$NDK_LIST_FILE" || true
 
-              # Truncate symbols/* only once symbols_map has already generated the corresponding .textproto
+            while true; do
+              sleep 10
+
               find "$SYM_DIR" -type f -size +0c 2>/dev/null | while IFS= read -r f; do
                 REL="${f#$SYM_DIR/}"
                 TEXTPROTO="$OBJ_DIR/PACKAGING/elf_symbol_mapping_intermediates/${REL}.textproto"
@@ -309,8 +318,7 @@ jobs:
                 fi
               done
 
-              # Truncate Make's unstripped obj/*_intermediates/LINKED/* copies once parent stripped binary exists
-              find "$OBJ_DIR" -path '*/LINKED/*' -type f -size +512k -mmin +3 2>/dev/null | while IFS= read -r f; do
+              find "$OBJ_DIR" -path '*/LINKED/*' -type f -size +256k -mmin +1 2>/dev/null | while IFS= read -r f; do
                 BASE=$(basename "$f")
                 INTER_DIR=$(dirname "$(dirname "$f")")
                 if [ -s "$INTER_DIR/$BASE" ]; then
@@ -320,15 +328,13 @@ jobs:
                 fi
               done
 
-              # Truncate Soong's C/C++ unstripped/* binaries >3m old once stripped output exists (never touches NDK or Rust)
-              NDK_STEMS=$(find "$SOONG_INT" -type d -name '*.ndk' 2>/dev/null | sed 's|.*/||; s|\.ndk$||' | sort -u)
-              find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +512k -mmin +3 2>/dev/null | while IFS= read -r f; do
+              find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +256k -mmin +1 2>/dev/null | while IFS= read -r f; do
                 BASE=$(basename "$f")
                 STEM="${BASE%.*}"
                 case "$STEM" in
                   libc|libm|libdl|liblog|libz|libstdc++|libEGL|libGLESv1_CM|libGLESv2|libGLESv3|libvulkan|libOpenSLES|libOpenMAXAL|libandroid|libjnigraphics|libmediandk|libcamera2ndk|libaaudio|libamidi|libbinder_ndk|libnativehelper|libnativewindow|libneuralnetworks|libsync|libicu) continue ;;
                 esac
-                if printf '%s\n' "$NDK_STEMS" | grep -qxF "$STEM"; then
+                if [ -s "$NDK_LIST_FILE" ] && grep -qxF "$STEM" "$NDK_LIST_FILE"; then
                   continue
                 fi
                 VARIANT_DIR=$(dirname "$(dirname "$f")")
@@ -347,9 +353,14 @@ jobs:
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
 
-            df -h / /mnt
-            free -h
             mka -j2 nothing
+
+            # Truncate ~9.5 GB of unbuilt CTS/dEQP/old-VNDK files in-place (preserves dir mtimes so soong_build never re-runs)
+            find cts external/deqp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
+              -type f -size +32k -exec truncate -s 0 {} + 2>/dev/null || true
+
+            df -h / /mnt /home/runner/out/target/common
+            free -h
             mka ${{ inputs.target }} -j"$(nproc)"
           '
           BUILD_EXIT=$?

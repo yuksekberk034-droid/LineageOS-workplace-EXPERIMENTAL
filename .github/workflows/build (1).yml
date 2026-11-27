@@ -391,11 +391,11 @@ jobs:
 
             mka -j2 nothing
 
-            # Truncate ~9.5 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves dir timestamps)
-            find cts external/deqp external/ltp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
-              -type f -size +32k \
-              ! -name "*.bp" ! -name "*.mk" ! -name "*.txt" ! -name "*.xml" ! -name "*.json" ! -name "*.go" ! -name "*.py" ! -name "*.sh" ! -name "*.rc" ! -name "*.te" ! -name "*.cil" ! -name "*.proto" \
-              -exec truncate -s 0 {} + 2>/dev/null || true
+          # Truncate ~9 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves source code & dir timestamps)
+          find cts external/deqp external/ltp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
+           -type f -size +32k \
+           ! -name "*.bp" ! -name "*.mk" ! -name "*.txt" ! -name "*.xml" ! -name "*.json" ! -name "*.go" ! -name "*.py" ! -name "*.sh" ! -name "*.rc" ! -name "*.te" ! -name "*.cil" ! -name "*.proto" ! -name "*.java" ! -name "*.kt" ! -name "*.c" ! -name "*.cpp" ! -name "*.h" \
+           -exec truncate -s 0 {} + 2>/dev/null || true
 
             df -h / /mnt
             free -h

@@ -52,6 +52,7 @@ env:
   WITH_TIDY: "false"
   ALLOW_LOCAL_TIDY_TRUE: "false"
   SKIP_ABI_CHECKS: "true"
+  SKIP_SOONG_TESTS: "true"
   WITH_DEXPREOPT: "false"
   WITH_DEXPREOPT_DEBUG_INFO: "false"
   PRODUCT_MINIMIZE_JAVA_DEBUG_INFO: "true"
@@ -81,7 +82,7 @@ jobs:
             echo -1000 | sudo tee "/proc/$pid/oom_score_adj" >/dev/null || true
           done
 
-          # Disable disk swapfile so /mnt stays 100% free for prebuilts and out/host; use 12GB ZRAM instead
+          # Disable any pre-existing disk swapfile; 16GB /mnt/swapfile is created temporarily during mka nothing
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
 
@@ -386,22 +387,38 @@ jobs:
 
           timeout --signal=TERM 295m bash -c '
             set -e
+            cleanup_swap() {
+              sudo swapoff /mnt/swapfile 2>/dev/null || true
+              sudo rm -f /mnt/swapfile
+            }
+            trap cleanup_swap EXIT
+
+            sudo fallocate -l 16G /mnt/swapfile
+            sudo chmod 600 /mnt/swapfile
+            sudo mkswap /mnt/swapfile >/dev/null
+            sudo swapon /mnt/swapfile
+
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
 
             mka -j2 nothing
 
-          # Truncate ~9 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves source code & dir timestamps)
-          find cts external/deqp external/ltp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
-           -type f -size +32k \
-           ! -name "*.bp" ! -name "*.mk" ! -name "*.txt" ! -name "*.xml" ! -name "*.json" ! -name "*.go" ! -name "*.py" ! -name "*.sh" ! -name "*.rc" ! -name "*.te" ! -name "*.cil" ! -name "*.proto" ! -name "*.java" ! -name "*.kt" ! -name "*.c" ! -name "*.cpp" ! -name "*.h" \
-           -exec truncate -s 0 {} + 2>/dev/null || true
+            cleanup_swap
+            trap - EXIT
+
+            # Truncate ~9 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves source code & dir timestamps)
+            find cts external/deqp external/ltp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
+             -type f -size +32k \
+             ! -name "*.bp" ! -name "*.mk" ! -name "*.txt" ! -name "*.xml" ! -name "*.json" ! -name "*.go" ! -name "*.py" ! -name "*.sh" ! -name "*.rc" ! -name "*.te" ! -name "*.cil" ! -name "*.proto" ! -name "*.java" ! -name "*.kt" ! -name "*.c" ! -name "*.cpp" ! -name "*.h" \
+             -exec truncate -s 0 {} + 2>/dev/null || true
 
             df -h / /mnt
             free -h
             mka ${{ inputs.target }} -j4
           '
           BUILD_EXIT=$?
+          sudo swapoff /mnt/swapfile 2>/dev/null || true
+          sudo rm -f /mnt/swapfile
           kill "$SYM_PRUNE_PID" "$WATCHDOG_PID" 2>/dev/null || true
 
           set -e

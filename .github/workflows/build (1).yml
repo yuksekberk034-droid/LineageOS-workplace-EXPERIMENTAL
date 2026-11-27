@@ -82,7 +82,7 @@ jobs:
             echo -1000 | sudo tee "/proc/$pid/oom_score_adj" >/dev/null || true
           done
 
-          # Disable any pre-existing disk swapfile; 16GB /mnt/swapfile is created temporarily during mka nothing
+          # Disable any pre-existing disk swapfile; temporary swap on /mnt is managed during the build step
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
 
@@ -375,24 +375,28 @@ jobs:
 
           timeout --signal=TERM 295m bash -c '
             set -e
-            cleanup_swap() {
+            set_swap() {
+              local size="$1"
               sudo swapoff /mnt/swapfile 2>/dev/null || true
               sudo rm -f /mnt/swapfile
+              if [ -n "$size" ]; then
+                sudo fallocate -l "$size" /mnt/swapfile
+                sudo chmod 600 /mnt/swapfile
+                sudo mkswap /mnt/swapfile >/dev/null
+                sudo swapon /mnt/swapfile
+              fi
             }
-            trap cleanup_swap EXIT
+            trap "set_swap \"\"" EXIT
 
-            sudo fallocate -l 16G /mnt/swapfile
-            sudo chmod 600 /mnt/swapfile
-            sudo mkswap /mnt/swapfile >/dev/null
-            sudo swapon /mnt/swapfile
+            set_swap 16G
 
             source build/envsetup.sh
             lunch "lineage_${{ inputs.product }}-${{ inputs.build_type }}"
 
             mka -j2 nothing
 
-            cleanup_swap
-            trap - EXIT
+            # Downsize swap from 16G to 8G (frees 8 GB disk while keeping 8 GB swap for 98% R8/packaging spikes)
+            set_swap 8G
 
             # Truncate ~9 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves source code & dir timestamps)
             find cts external/deqp external/ltp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
@@ -402,7 +406,10 @@ jobs:
 
             df -h / /mnt
             free -h
-            mka ${{ inputs.target }} -j4
+            mka ${{ inputs.target }} -j2
+
+            set_swap ""
+            trap - EXIT
           '
           BUILD_EXIT=$?
           sudo swapoff /mnt/swapfile 2>/dev/null || true
@@ -471,4 +478,4 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/product.img
             /home/runner/out/target/product/${{ inputs.device }}/system_ext.img
-    
+            /home/runner/out/target/product/${{ inputs.device }}/recovery.img

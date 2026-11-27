@@ -60,6 +60,7 @@ PRODUCT_CHARACTERISTICS := tablet
 # Rootdir
 PRODUCT_PACKAGES += \
     init.insmod.sh \
+    snapuserd_ramdisk
 
 PRODUCT_PACKAGES += \
     fstab.mt6761 \
@@ -87,11 +88,11 @@ PRODUCT_PACKAGES += \
     meta_init.vendor.rc \
     multi_init.rc \
     init.recovery.mt6761.rc \
-    init.recovery.mt8766.rc \
+    init.recovery.mt8766.rc
 
 PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/rootdir/etc/fstab.mt6761:$(TARGET_COPY_OUT_RAMDISK)/fstab.mt6761 \
-    $(LOCAL_PATH)/rootdir/etc/fstab.mt6761:$(TARGET_COPY_OUT_RAMDISK)/fstab.mt8766
+    $(LOCAL_PATH)/rootdir/etc/fstab.mt6761:$(TARGET_COPY_OUT_RAMDISK)/first_stage_ramdisk/fstab.mt6761 \
+    $(LOCAL_PATH)/rootdir/etc/fstab.mt6761:$(TARGET_COPY_OUT_RAMDISK)/first_stage_ramdisk/fstab.mt8766
 
 # Soong namespaces
 PRODUCT_SOONG_NAMESPACES += \

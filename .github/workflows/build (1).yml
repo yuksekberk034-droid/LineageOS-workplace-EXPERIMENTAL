@@ -33,8 +33,14 @@ on:
           - productimage
           - systemextimage
           - systemimage
+          - systemimage vendorimage productimage systemextimage
           - systemimage vendorimage productimage systemextimage bootimage
           - bacon
+      enable_build_limit:
+        description: "Enable 4h55m build cutoff & checkpoint upload (off = run up to GitHub 6h max)"
+        required: true
+        default: false
+        type: boolean
       resume_from_checkpoint:
         description: "Resume from a previous timeout checkpoint GitHub Release"
         required: true
@@ -65,7 +71,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 355
+    timeout-minutes: 358
     permissions:
       contents: write
     env:
@@ -257,7 +263,7 @@ jobs:
             fi
           done
 
-          # If /mnt still has >10 GB free (e.g. AWS runner), move out/target/common there too
+          # If /mnt still has >10 GB free, move out/target/common there too
           MNT_FREE_KB=$(df -Pk /mnt | awk 'NR==2 {print $4}')
           if [ "${MNT_FREE_KB:-0}" -gt 10500000 ]; then
             rm -rf /home/runner/out/target/common
@@ -373,7 +379,7 @@ jobs:
           ) &
           SYM_PRUNE_PID=$!
 
-          timeout --signal=TERM 295m bash -c '
+          BUILD_CMD='
             set -e
             set_swap() {
               local size="$1"
@@ -395,7 +401,7 @@ jobs:
 
             mka -j2 nothing
 
-            # Downsize swap from 16G to 8G (frees 8 GB disk while keeping 8 GB swap for 98% R8/packaging spikes)
+            # Downsize swap from 16G to 8G (frees 8 GB disk while keeping 8 GB swap for R8/packaging)
             set_swap 8G
 
             # Truncate ~9 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves source code & dir timestamps)
@@ -406,12 +412,21 @@ jobs:
 
             df -h / /mnt
             free -h
-            mka ${{ inputs.target }} -j2
+            mka ${{ inputs.target }} -j3
 
             set_swap ""
             trap - EXIT
           '
+
+          if [ "${{ inputs.enable_build_limit }}" = "true" ]; then
+            echo "Build time limit ENABLED (295m safety cutoff with checkpointing)."
+            timeout --signal=TERM 295m bash -c "$BUILD_CMD"
+          else
+            echo "Build time limit DISABLED (running continuously up to GitHub runner limit)."
+            bash -c "$BUILD_CMD"
+          fi
           BUILD_EXIT=$?
+
           sudo swapoff /mnt/swapfile 2>/dev/null || true
           sudo rm -f /mnt/swapfile
           kill "$SYM_PRUNE_PID" "$WATCHDOG_PID" 2>/dev/null || true
@@ -420,20 +435,33 @@ jobs:
           if [ "$BUILD_EXIT" -eq 0 ]; then
             echo "Build completed successfully!"
             exit 0
-          elif [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 143 ]; then
+          elif [ "${{ inputs.enable_build_limit }}" = "true" ] && { [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 143 ]; }; then
             echo "Build reached 4h55m safety limit. Streaming checkpoint chunks to GitHub Release..."
             mkdir -p /tmp/ckpt
+            rm -rf /home/runner/out/soong/.temp/*
             gh release delete build-checkpoint --repo "$STORAGE_REPO" --yes --cleanup-tag || true
+            sleep 5
             gh release create build-checkpoint \
               --repo "$STORAGE_REPO" \
-              --prerelease \
               --title "LineageOS 20.0 Build Checkpoint" \
               --notes "Auto-generated build checkpoint"
+            sleep 5
 
             set -o pipefail
-            tar -cPf - --exclude='*/symbols/*' /home/runner/out /mnt/out_ext \
+            tar -cPf - --exclude='*/symbols/*' --exclude='*/.temp/*' /home/runner/out /mnt/out_ext \
               | zstd -3 -T0 \
-              | split -b 1900M --filter='cat > /tmp/ckpt/$FILE && gh release upload build-checkpoint /tmp/ckpt/$FILE --repo "$STORAGE_REPO" && rm -f /tmp/ckpt/$FILE' - out_checkpoint.tar.zst.part_
+              | split -b 1900M --filter='
+                cat > /tmp/ckpt/$FILE
+                for attempt in 1 2 3 4; do
+                  if gh release upload build-checkpoint /tmp/ckpt/$FILE --repo "$STORAGE_REPO" --clobber; then
+                    rm -f /tmp/ckpt/$FILE
+                    exit 0
+                  fi
+                  echo "Upload attempt $attempt failed for $FILE, retrying in 10s..."
+                  sleep 10
+                done
+                exit 1
+              ' - out_checkpoint.tar.zst.part_
 
             echo "Checkpoint saved. Re-run with resume_from_checkpoint=true."
             exit 1

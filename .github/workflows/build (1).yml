@@ -25,7 +25,7 @@ on:
       target:
         description: "Make target"
         required: true
-        default: "bootimage"
+        default: "systemimage"
         type: choice
         options:
           - bootimage
@@ -77,17 +77,16 @@ jobs:
       GH_TOKEN: ${{ secrets.STORAGE_TOKEN || secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Purge Unused Ubuntu Packages & Configure Hybrid ZRAM + Swap
+      - name: Purge Unused Ubuntu Packages & Configure 12GB ZRAM
         run: |
           set -e
           sudo systemctl stop systemd-oomd docker docker.socket containerd snapd || true
 
-          # Protect GitHub Actions runner processes from Linux OOM killer
           for pid in $(pgrep -f "Runner\."); do
             echo -1000 | sudo tee "/proc/$pid/oom_score_adj" >/dev/null || true
           done
 
-          # Configure ZRAM (high priority) + dynamic /mnt/swapfile sized to leave room for out/host
+          # Disable disk swapfile so /mnt stays 100% free for prebuilts and out/host; use 12GB ZRAM instead
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
 
@@ -97,24 +96,12 @@ jobs:
           fi
           if [ -b /dev/zram0 ]; then
             sudo zramctl /dev/zram0 --reset 2>/dev/null || true
-            if sudo zramctl /dev/zram0 --algorithm zstd --size 6G 2>/dev/null; then
+            if sudo zramctl /dev/zram0 --algorithm zstd --size 12G 2>/dev/null; then
               sudo mkswap /dev/zram0 >/dev/null
               sudo swapon -p 100 /dev/zram0
             fi
           fi
-
-          MNT_AVAIL_GB=$(df -BG /mnt | awk 'NR==2 {gsub(/G/,"",$4); print $4}')
-          SWAP_GB=16
-          if [ "${MNT_AVAIL_GB:-0}" -lt 24 ]; then
-            SWAP_GB=8
-          fi
-          if [ "${MNT_AVAIL_GB:-0}" -gt 12 ]; then
-            sudo fallocate -l "${SWAP_GB}G" /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=$((SWAP_GB * 1024)) status=none
-            sudo chmod 600 /mnt/swapfile
-            sudo mkswap /mnt/swapfile >/dev/null
-            sudo swapon -p 10 /mnt/swapfile
-          fi
-          sudo sysctl -w vm.swappiness=20
+          sudo sysctl -w vm.swappiness=60
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-remove-essential \
             'temurin-*' 'openjdk-*' 'google-chrome-*' 'microsoft-edge-*' 'firefox*' \
@@ -200,7 +187,7 @@ jobs:
           chmod a+x ~/.bin/repo
           echo "$HOME/.bin" >> "$GITHUB_PATH"
 
-      - name: Sync LineageOS Source & Optimize Storage
+      - name: Sync LineageOS Source & Purge Unused Prebuilts
         run: |
           set -e
           mkdir -p ~/android
@@ -217,7 +204,6 @@ jobs:
           git clone --depth=1 https://github.com/yuksekberk034-droid/LineageOS-workplace-EXPERIMENTAL.git "device/tcl/${{ inputs.device }}"
           git clone --depth=1 https://github.com/yuksekberk034-droid/TCL-8492A-Vendor-tree.git "vendor/tcl/${{ inputs.device }}"
 
-          # Snapshot manifest, then delete .repo, all .git dirs, and non-Linux/ARM prebuilts
           repo manifest -o /tmp/build-manifest-snapshot.xml -r
           rm -rf .repo \
             prebuilts/*/darwin-x86 \
@@ -230,7 +216,6 @@ jobs:
             external/chromium-webview/prebuilt/x86_64
           find . -name ".git" -prune -exec rm -rf {} +
 
-          # Remove unreferenced older Clang toolchains while keeping clang-r450784d and RenderScript's clang-3289846
           REFERENCED_CLANGS=$(grep -rhoE 'clang-[0-9a-zA-Z_-]+' build/ device/ vendor/ kernel/ 2>/dev/null | sort -u || true)
           for cdir in prebuilts/clang/host/linux-x86/clang-*; do
             [ -d "$cdir" ] || continue
@@ -251,7 +236,7 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nif "manifest" in sys.argv[1:]:\n    sys.stdout.write(open("/tmp/build-manifest-snapshot.xml").read())\n' > .repo/repo/repo
           chmod +x .repo/repo/repo
 
-          # Offload static prebuilts to /mnt via bind mounts while reserving 4.8 GB on /mnt for out/host
+          # Offload static prebuilts to /mnt via bind mounts while reserving 4.5 GB on /mnt for out/host
           for d in \
             prebuilts/build-tools \
             prebuilts/misc \
@@ -267,7 +252,7 @@ jobs:
             if [ -d "$HOME/android/$d" ]; then
               DIR_KB=$(du -sk "$HOME/android/$d" | awk '{print $1}')
               MNT_FREE_KB=$(df -Pk /mnt | awk 'NR==2 {print $4}')
-              if [ $((MNT_FREE_KB - DIR_KB)) -gt 4800000 ]; then
+              if [ $((MNT_FREE_KB - DIR_KB)) -gt 4500000 ]; then
                 mkdir -p "/mnt/prebuilts_ext/$(dirname "$d")"
                 mv "$HOME/android/$d" "/mnt/prebuilts_ext/$d"
                 mkdir -p "$HOME/android/$d"
@@ -275,6 +260,14 @@ jobs:
               fi
             fi
           done
+
+          # If /mnt still has >10 GB free (e.g. AWS runner), move out/target/common there too
+          MNT_FREE_KB=$(df -Pk /mnt | awk 'NR==2 {print $4}')
+          if [ "${MNT_FREE_KB:-0}" -gt 10500000 ]; then
+            rm -rf /home/runner/out/target/common
+            mkdir -p /mnt/out_ext/common
+            ln -sfn /mnt/out_ext/common /home/runner/out/target/common
+          fi
 
           df -h / /mnt
           free -h
@@ -300,10 +293,9 @@ jobs:
           mkdir -p "/home/runner/out/target/product/${{ inputs.device }}/symbols"
           ln -sfn /mnt/out_ext/host /home/runner/out/host
 
-          # Immediately reclaim ~6-8 GB from already-stripped C/C++ unstripped/* files restored from the checkpoint
           SOONG_INT="/home/runner/out/soong/.intermediates"
           NDK_STEMS=$(find "$SOONG_INT" -type d -name '*.ndk' 2>/dev/null | sed 's|.*/||; s|\.ndk$||' | sort -u)
-          find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +512k 2>/dev/null | while IFS= read -r f; do
+          find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +256k 2>/dev/null | while IFS= read -r f; do
             BASE=$(basename "$f")
             STEM="${BASE%.*}"
             case "$STEM" in
@@ -328,22 +320,21 @@ jobs:
           set +e
           cd ~/android
 
-          # Background memory & disk watchdog (logs every 60s)
           (
             while true; do
               sleep 60
-              echo "=== [$(date -u +%H:%M:%S)] MEM: $(free -h | awk '/Mem:/ {print $3"/"$2}') | SWAP: $(free -h | awk '/Swap:/ {print $3"/"$2}') | DISK FREE: $(df -h / | awk 'NR==2 {print $4}') ==="
+              echo "=== [$(date -u +%H:%M:%S)] MEM: $(free -h | awk '/Mem:/ {print $3"/"$2}') | SWAP: $(free -h | awk '/Swap:/ {print $3"/"$2}') | DISK FREE /: $(df -h / | awk 'NR==2 {print $4}') | /mnt: $(df -h /mnt | awk 'NR==2 {print $4}') ==="
             done
           ) &
           WATCHDOG_PID=$!
 
-          # Safely truncate completed symbols (after .textproto exists), Make LINKED/*, and non-NDK/non-Rust unstripped/*
+          # Aggressive live cleaner: truncates symbols, LINKED/*, unstripped/*, and already-linked .o object files
           (
             SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
             OBJ_DIR="/home/runner/out/target/product/${{ inputs.device }}/obj"
             SOONG_INT="/home/runner/out/soong/.intermediates"
             while true; do
-              sleep 15
+              sleep 12
 
               find "$SYM_DIR" -type f -size +0c 2>/dev/null | while IFS= read -r f; do
                 REL="${f#$SYM_DIR/}"
@@ -355,7 +346,7 @@ jobs:
                 fi
               done
 
-              find "$OBJ_DIR" -path '*/LINKED/*' -type f -size +512k -mmin +3 2>/dev/null | while IFS= read -r f; do
+              find "$OBJ_DIR" -path '*/LINKED/*' -type f -size +256k -mmin +2 2>/dev/null | while IFS= read -r f; do
                 BASE=$(basename "$f")
                 INTER_DIR=$(dirname "$(dirname "$f")")
                 if [ -s "$INTER_DIR/$BASE" ]; then
@@ -366,7 +357,7 @@ jobs:
               done
 
               NDK_STEMS=$(find "$SOONG_INT" -type d -name '*.ndk' 2>/dev/null | sed 's|.*/||; s|\.ndk$||' | sort -u)
-              find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +512k -mmin +3 2>/dev/null | while IFS= read -r f; do
+              find "$SOONG_INT" -path '*/unstripped/*' ! -path '*_dylib/*' ! -path '*_rlib/*' ! -name '*.dylib.so' ! -name '*.rlib' -type f -size +256k -mmin +2 2>/dev/null | while IFS= read -r f; do
                 BASE=$(basename "$f")
                 STEM="${BASE%.*}"
                 case "$STEM" in
@@ -377,6 +368,18 @@ jobs:
                 fi
                 VARIANT_DIR=$(dirname "$(dirname "$f")")
                 if [ -s "$VARIANT_DIR/$BASE" ] || [ -s "$VARIANT_DIR/stripped/$BASE" ]; then
+                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+                  truncate -s 0 "$f" 2>/dev/null || continue
+                  touch -d "@$MTIME" "$f" 2>/dev/null || true
+                fi
+              done
+
+              # Truncate compiled .o files once their parent variant directory has a newer linked .so or .a output
+              find "$SOONG_INT" -path '*/obj/*' -name '*.o' -type f -size +64k -mmin +2 2>/dev/null | while IFS= read -r f; do
+                VARIANT_DIR="${f%%/obj/*}"
+                [ -d "$VARIANT_DIR" ] || continue
+                LINKED_OUT=$(find "$VARIANT_DIR" -maxdepth 1 -type f -size +0c \( -name '*.so' -o -name '*.a' \) ! -name '*.tmp*' -print -quit 2>/dev/null)
+                if [ -n "$LINKED_OUT" ] && [ ! "$f" -nt "$LINKED_OUT" ]; then
                   MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
                   truncate -s 0 "$f" 2>/dev/null || continue
                   touch -d "@$MTIME" "$f" 2>/dev/null || true
@@ -393,7 +396,7 @@ jobs:
 
             mka -j2 nothing
 
-            # Truncate ~9.5 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves dir timestamps so soong_build never re-runs)
+            # Truncate ~9.5 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves dir timestamps)
             find cts external/deqp external/ltp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
               -type f -size +32k \
               ! -name "*.bp" ! -name "*.mk" ! -name "*.txt" ! -name "*.xml" ! -name "*.json" ! -name "*.go" ! -name "*.py" ! -name "*.sh" ! -name "*.rc" ! -name "*.te" ! -name "*.cil" ! -name "*.proto" \

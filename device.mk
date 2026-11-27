@@ -91,8 +91,8 @@ PRODUCT_PACKAGES += \
     init.recovery.mt8766.rc
 
 PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/rootdir/etc/fstab.mt6761:$(TARGET_COPY_OUT_RAMDISK)/first_stage_ramdisk/fstab.mt6761 \
-    $(LOCAL_PATH)/rootdir/etc/fstab.mt6761:$(TARGET_COPY_OUT_RAMDISK)/first_stage_ramdisk/fstab.mt8766
+    $(LOCAL_PATH)/rootdir/etc/fstab.mt6761:$(TARGET_COPY_OUT_RAMDISK)/fstab.mt6761 \
+    $(LOCAL_PATH)/rootdir/etc/fstab.mt6761:$(TARGET_COPY_OUT_RAMDISK)/fstab.mt8766
 
 # Soong namespaces
 PRODUCT_SOONG_NAMESPACES += \

@@ -324,7 +324,7 @@ jobs:
           ) &
           WATCHDOG_PID=$!
 
-          # Aggressive live cleaner: truncates symbols, LINKED/*, unstripped/*, and already-linked .o object files
+          # Safe live cleaner: truncates terminal symbols, LINKED/*, and unstripped/* once stripped outputs exist
           (
             SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
             OBJ_DIR="/home/runner/out/target/product/${{ inputs.device }}/obj"
@@ -364,18 +364,6 @@ jobs:
                 fi
                 VARIANT_DIR=$(dirname "$(dirname "$f")")
                 if [ -s "$VARIANT_DIR/$BASE" ] || [ -s "$VARIANT_DIR/stripped/$BASE" ]; then
-                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
-                  truncate -s 0 "$f" 2>/dev/null || continue
-                  touch -d "@$MTIME" "$f" 2>/dev/null || true
-                fi
-              done
-
-              # Truncate compiled .o files once their parent variant directory has a newer linked .so or .a output
-              find "$SOONG_INT" -path '*/obj/*' -name '*.o' -type f -size +64k -mmin +2 2>/dev/null | while IFS= read -r f; do
-                VARIANT_DIR="${f%%/obj/*}"
-                [ -d "$VARIANT_DIR" ] || continue
-                LINKED_OUT=$(find "$VARIANT_DIR" -maxdepth 1 -type f -size +0c \( -name '*.so' -o -name '*.a' \) ! -name '*.tmp*' -print -quit 2>/dev/null)
-                if [ -n "$LINKED_OUT" ] && [ ! "$f" -nt "$LINKED_OUT" ]; then
                   MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
                   truncate -s 0 "$f" 2>/dev/null || continue
                   touch -d "@$MTIME" "$f" 2>/dev/null || true
@@ -483,4 +471,4 @@ jobs:
             /home/runner/out/target/product/${{ inputs.device }}/vendor.img
             /home/runner/out/target/product/${{ inputs.device }}/product.img
             /home/runner/out/target/product/${{ inputs.device }}/system_ext.img
-            /home/runner/out/target/product/${{ inputs.device }}/recovery.img
+    

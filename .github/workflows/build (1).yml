@@ -433,7 +433,7 @@ jobs:
 
             df -h / /mnt
             free -h
-            mka ${{ inputs.target }} -j3
+            mka WITH_DEXPREOPT=false ${{ inputs.target }} -j3
 
             set_swap ""
             trap - EXIT

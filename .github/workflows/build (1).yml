@@ -25,7 +25,7 @@ on:
       target:
         description: "Make target"
         required: true
-        default: "systemimage"
+        default: "systemimage vendorimage productimage systemextimage"
         type: choice
         options:
           - bootimage
@@ -214,6 +214,9 @@ jobs:
             prebuilts/*/*/windows-x86 \
             prebuilts/gcc/linux-x86/x86 \
             prebuilts/gcc/linux-x86/mips \
+            prebuilts/android-emulator \
+            prebuilts/qemu-kernel \
+            prebuilts/fuchsia_sdk \
             external/chromium-webview/prebuilt/x86 \
             external/chromium-webview/prebuilt/x86_64
           find . -name ".git" -prune -exec rm -rf {} +
@@ -326,11 +329,17 @@ jobs:
             while true; do
               sleep 60
               echo "=== [$(date -u +%H:%M:%S)] MEM: $(free -h | awk '/Mem:/ {print $3"/"$2}') | SWAP: $(free -h | awk '/Swap:/ {print $3"/"$2}') | DISK FREE /: $(df -h / | awk 'NR==2 {print $4}') | /mnt: $(df -h /mnt | awk 'NR==2 {print $4}') ==="
+              FREE_KB=$(df -Pk / | awk 'NR==2 {print $4}')
+              if [ "${FREE_KB:-0}" -lt 3670016 ] && [ -f /mnt/swapfile ]; then
+                echo "=== [$(date -u +%H:%M:%S)] Low disk space (<3.5G), releasing /mnt/swapfile to prevent ENOSPC ==="
+                sudo swapoff /mnt/swapfile 2>/dev/null || true
+                sudo rm -f /mnt/swapfile
+              fi
             done
           ) &
           WATCHDOG_PID=$!
 
-          # Safe live cleaner: truncates terminal symbols, LINKED/*, and unstripped/* once stripped outputs exist
+          # Safe live cleaner: truncates terminal symbols, LINKED/*, unstripped/*, and *_shared/obj/*.o after .so links
           (
             SYM_DIR="/home/runner/out/target/product/${{ inputs.device }}/symbols"
             OBJ_DIR="/home/runner/out/target/product/${{ inputs.device }}/obj"
@@ -375,6 +384,18 @@ jobs:
                   touch -d "@$MTIME" "$f" 2>/dev/null || true
                 fi
               done
+
+              # Safe .o cleanup strictly for *_shared variants after their linked .so exists (never touches *_static thin archives)
+              find "$SOONG_INT" -path '*_shared/obj/*' -name '*.o' -type f -size +64k -mmin +2 2>/dev/null | while IFS= read -r f; do
+                VARIANT_DIR="${f%%/obj/*}"
+                [ -d "$VARIANT_DIR" ] || continue
+                LINKED_SO=$(find "$VARIANT_DIR" -maxdepth 1 -type f -size +0c -name '*.so' ! -name '*.tmp*' -print -quit 2>/dev/null)
+                if [ -n "$LINKED_SO" ] && [ ! "$f" -nt "$LINKED_SO" ]; then
+                  MTIME=$(stat -c %Y "$f" 2>/dev/null) || continue
+                  truncate -s 0 "$f" 2>/dev/null || continue
+                  touch -d "@$MTIME" "$f" 2>/dev/null || true
+                fi
+              done
             done
           ) &
           SYM_PRUNE_PID=$!
@@ -401,8 +422,8 @@ jobs:
 
             mka -j2 nothing
 
-            # Downsize swap from 16G to 8G (frees 8 GB disk while keeping 8 GB swap for R8/packaging)
-            set_swap 8G
+            # Downsize swap from 16G to 5G (covers 4.2G peak swap while freeing 11G disk for packaging)
+            set_swap 5G
 
             # Truncate ~9 GB of unbuilt CTS/dEQP/old-VNDK binary & asset files in-place (preserves source code & dir timestamps)
             find cts external/deqp external/ltp prebuilts/vndk/v28 prebuilts/vndk/v29 prebuilts/vndk/v30 test/vts test/mts test/suite_harness sdk pdk developers \
